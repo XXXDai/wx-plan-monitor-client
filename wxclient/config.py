@@ -32,7 +32,7 @@ DEFAULTS: dict[str, Any] = {
         # 例：C:\\Users\\你\\Documents\\xwechat_files\\<wxid>\\msg\\file
         "wechat_file_dir": "",
         "chats": [],  # 要监听的群名（必须与微信里显示的名称完全一致）
-        "poll_interval": 2,  # 秒
+        "poll_interval": 10,  # 秒，每隔多久轮询一次群消息
         "upload_suffixes": [".docx", ".doc", ".xlsx", ".xls", ".pdf", ".txt", ".md", ".csv"],
         "send_text": True,  # 是否上报文本消息
         "senders_only": [],  # 非空时只上报这些人的文本消息（文件永远上报）

@@ -19,7 +19,7 @@ monitor:
   wechat_file_dir: ""
   chats:                                  # 要监听的群名，必须与微信窗口里显示的完全一致
     - 套保方案群
-  poll_interval: 2                        # 拉取新消息的间隔（秒）
+  poll_interval: 10                       # 每隔多少秒轮询一次群消息（免费版轮询模式）
   upload_suffixes:                        # 这些后缀的文件才上传给服务端解析
     - .docx
     - .doc
