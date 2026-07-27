@@ -1,0 +1,4 @@
+requests>=2.31
+PyYAML>=6.0
+# wxauto 只在 Windows 上安装/运行（macOS、Linux 请用 --mock-dir 模拟模式调试）
+wxauto>=3.9.11; sys_platform == "win32"

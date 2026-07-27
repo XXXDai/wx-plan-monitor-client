@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+config.yaml
+data/
+mock_in/
+*.log
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
