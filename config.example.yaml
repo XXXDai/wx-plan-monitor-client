@@ -9,6 +9,14 @@ server:
 monitor:
   # 微信 4.1+（如 4.1.8.107）用 wxauto4；微信 3.9.x 用 wxauto；auto = 自动选
   backend: auto                           # auto | wxauto4 | wxauto | mock
+  # 监听方式：auto = 装了 Plus(wxautox4) 就用 AddListenChat 回调，免费版 wxauto4 自动改轮询
+  poll_mode: auto                         # auto | listen | poll
+  # ⚠️ 免费版 wxauto4 无法下载群文件！方案文件靠"目录监视"捕获：
+  #   1) 在微信设置里开启"自动下载"，或收到后手动下载
+  #   2) 把微信文件保存目录填到这里，程序会自动上传里面新出现的方案文件
+  #   例（4.x 默认）：C:\Users\你的用户名\Documents\xwechat_files\wxid_xxx\msg\file
+  #   装了 Plus 版 wxautox4 则可留空（走 download()）
+  wechat_file_dir: ""
   chats:                                  # 要监听的群名，必须与微信窗口里显示的完全一致
     - 套保方案群
   poll_interval: 2                        # 拉取新消息的间隔（秒）
