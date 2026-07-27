@@ -1,25 +1,22 @@
-"""微信消息来源适配层。
+"""微信消息来源适配层（只支持免费版 wxauto4）。
 
 后端由 `monitor.backend` 选择（默认 auto）：
 
-| backend   | 适用微信版本            | 包                       | 监听方式 |
-|-----------|-------------------------|--------------------------|----------|
-| `wxauto4` | **4.1+**（含 4.1.8.107）| `wxauto4`(免费) / `wxautox4`(Plus) | 见下 |
-| `wxauto`  | 3.9.x（旧版）           | `wxauto`                 | 轮询 `GetListenMessage()` |
-| `mock`    | —                       | —                        | 读目录里的 json，任何系统可跑 |
+| backend   | 适用微信版本            | 包                | 监听方式 |
+|-----------|-------------------------|-------------------|----------|
+| `wxauto4` | **4.1+**（含 4.1.8.107）| `wxauto4`（免费）  | 轮询 ChatWith+GetAllMessage |
+| `wxauto`  | 3.9.x（旧版）           | `wxauto`（免费）   | 轮询 GetListenMessage |
+| `mock`    | —                       | —                 | 读目录里的 json，任何系统可跑 |
 
-⚠️ 关于 wxauto4 免费版 vs Plus 版（这是本文件复杂度的根源）：
+⚠️ 只用免费版。免费版 wxauto4 (cluic 41.x) 的能力有限：只有 ChatWith / GetSession /
+   GetAllMessage / SendMsg，消息属性 type,attr,sender,content,id,hash。
+   AddListenChat（后台监听）和 FileMessage.download()（下载文件）都是 Plus(wxautox4)
+   专属，**本项目不使用、也不安装 Plus 版**。因此：
 
-  免费版 wxauto4 (cluic 41.x) 只有：ChatWith / GetSession / GetAllMessage / SendMsg /
-  消息属性 type,attr,sender,content,id,hash。
-  **AddListenChat / GetNextNewMessage / KeepRunning / RemoveListenChat 以及
-  FileMessage.download() 全是 Plus(wxautox4) 专属**。
-
-  因此本适配层对 wxauto4 做能力探测：
-    - 有 AddListenChat（= Plus）→ 回调式监听，文件用 msg.download()，最省资源。
-    - 没有（= 免费版）        → 轮询：ChatWith(群) + GetAllMessage()，比对出新消息。
-      免费版**无法下载群文件**，所以文件改由 FolderWatchSource 盯微信下载目录来捕获
-      （见 monitor.wechat_file_dir），或升级到 Plus。
+     - 文本：轮询 —— 每隔 poll_interval 秒挨个 ChatWith(群) + GetAllMessage()，比对出新消息。
+             副作用是会来回切换微信当前聊天窗口，属正常现象。
+     - 文件：免费版无法下载群文件，改由 FolderWatchSource 盯微信文件下载目录来捕获
+             （见 monitor.wechat_file_dir）。
 
 统一归一化成 WxMessage，上层（Collector）只管调 `poll()`。
 """
@@ -30,7 +27,6 @@ import hashlib
 import json
 import logging
 import os
-import queue
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,76 +118,49 @@ def _msg_key(msg: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 微信 4.1+：wxauto4（免费轮询）/ wxautox4（Plus 回调）
+# 微信 4.1+：免费版 wxauto4（纯轮询）
 # --------------------------------------------------------------------------- #
 class WxAuto4Source(BaseSource):
-    """适配微信客户端 4.1+（如 4.1.8.107）。
+    """适配免费版 wxauto4（微信客户端 4.1+，如 4.1.8.107）。
 
-    能力探测决定监听方式：
-      - Plus（有 AddListenChat）：回调式，回调塞进线程安全队列，poll() 排空。
-      - 免费版（无 AddListenChat）：轮询 ChatWith(群)+GetAllMessage()，比对出新消息。
+    免费版没有后台监听，用轮询：每次 poll() 挨个 ChatWith(群)+GetAllMessage()，
+    按消息 id/hash 比对出新消息；首轮建立基线，不补历史。
+    免费版无法下载群文件，文件交给 FolderWatchSource 处理。
     """
 
     name = "wxauto4"
 
-    def __init__(
-        self,
-        save_pic: bool = False,
-        download_dir: str | Path | None = None,
-        mode: str = "auto",
-    ):
-        self.save_pic = save_pic
-        self.download_dir = Path(download_dir) if download_dir else None
-        if self.download_dir:
-            self.download_dir.mkdir(parents=True, exist_ok=True)
-        self.mode = mode  # auto | listen | poll
+    def __init__(self, save_pic: bool = False):
+        # save_pic 保留仅为兼容；免费版无法下载图片，图片只记录为 [image]
         self.wx: Any = None
-        self.pkg = ""
         self.chats: list[str] = []
-        self.use_listen = False
-        self._q: queue.Queue[WxMessage] = queue.Queue()
-        self._seen: dict[str, set[str]] = {}     # chat -> 已见消息 key
-        self._baselined: set[str] = set()         # 已建立基线的 chat（首轮不补历史）
-        self._errors = 0
+        self._seen: dict[str, set[str]] = {}   # chat -> 已见消息 key
         self._file_warned = False
 
-    # ---------- 导入 ---------- #
+    # ---------- 导入（只用免费版 wxauto4） ---------- #
     @staticmethod
     def import_wechat() -> tuple[Any, str]:
-        """优先 Plus 版（wxautox4，能监听+下载文件），否则免费版（wxauto4，仅轮询）。"""
-        last_err: Exception | None = None
-        for pkg in ("wxautox4", "wxauto4"):
-            try:
-                module = __import__(pkg, fromlist=["WeChat"])
-                return module.WeChat, pkg
-            except ImportError as exc:
-                last_err = exc
-        raise RuntimeError(
-            "未安装微信 4.x 版的 wxauto：请执行 `pip install wxauto4`"
-            "（Plus 版为 wxautox4）。微信 4.1.8.107 需要这个包，"
-            f"旧的 wxauto 只支持微信 3.9.x。原始错误：{last_err}"
-        )
+        try:
+            from wxauto4 import WeChat  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "未安装 wxauto4：请执行 `pip install wxauto4`（微信 4.1.8.107 免费版）。"
+                "本项目只用免费版，旧的 wxauto 只支持微信 3.9.x。"
+                f"原始错误：{exc}"
+            ) from exc
+        return WeChat, "wxauto4"
 
     # ---------- 启动 ---------- #
     def start(self, chats: Iterable[str]) -> None:
-        WeChat, self.pkg = self.import_wechat()
+        WeChat, _ = self.import_wechat()
         self.wx = WeChat()
-        log.info("已连接微信客户端（%s）：%s", self.pkg, self.describe_me())
+        log.info("已连接微信客户端（wxauto4 免费版）：%s", self.describe_me())
 
         self.chats = [c for c in chats if c]
         if not self.chats:
             raise RuntimeError("monitor.chats 为空，请先配置要监听的群名")
 
-        # 能力探测：决定监听方式
-        has_listen = callable(getattr(self.wx, "AddListenChat", None))
-        if self.mode == "listen" and not has_listen:
-            raise RuntimeError(
-                "配置要求 listen 模式，但当前包没有 AddListenChat（免费版 wxauto4 不支持）。"
-                "请升级到 Plus 版 wxautox4，或把 monitor.poll_mode 设为 auto/poll。"
-            )
-        self.use_listen = has_listen if self.mode == "auto" else (self.mode == "listen")
-
-        if self.wx and hasattr(self.wx, "IsOnline"):
+        if hasattr(self.wx, "IsOnline"):
             try:
                 if not self.wx.IsOnline():
                     log.warning("微信当前显示为未登录状态，可能收不到消息")
@@ -208,33 +177,12 @@ class WxAuto4Source(BaseSource):
                     "、".join(known[:8]),
                 )
 
-        if self.use_listen:
-            log.info("监听方式：回调（%s 支持 AddListenChat）", self.pkg)
-            for chat in self.chats:
-                self._add_listen(chat)
-        else:
-            log.warning(
-                "监听方式：轮询（%s 为免费版，不支持后台监听）。"
-                "注意：免费版无法下载群文件，方案文件请改用 wechat_file_dir 目录监视，"
-                "或升级到 Plus 版 wxautox4。",
-                self.pkg,
-            )
-            # 建立基线：把每个群当前已有消息标记为已见，避免上报历史
-            for chat in self.chats:
-                self._poll_chat(chat, baseline=True)
-
-    def _add_listen(self, chat: str) -> None:
-        cb = self._make_callback(chat)
-        try:
-            res = self.wx.AddListenChat(nickname=chat, callback=cb)
-        except TypeError:
-            try:
-                res = self.wx.AddListenChat(who=chat, callback=cb)
-            except TypeError:
-                res = self.wx.AddListenChat(chat, cb)
-        if _is_failure(res):
-            raise RuntimeError(f"监听群「{chat}」失败：{_failure_text(res)}")
-        log.info("已监听群：%s", chat)
+        log.info(
+            "监听方式：轮询（免费版 wxauto4）。文件请配置 monitor.wechat_file_dir 由目录监视捕获。"
+        )
+        # 建立基线：把每个群当前已有消息标记为已见，避免上报历史
+        for chat in self.chats:
+            self._poll_chat(chat, baseline=True)
 
     def describe_me(self) -> str:
         fn = getattr(self.wx, "GetMyInfo", None)
@@ -270,32 +218,7 @@ class WxAuto4Source(BaseSource):
             log.debug("GetSession 失败：%s", exc)
             return []
 
-    # ---------- 回调模式（Plus） ---------- #
-    def _make_callback(self, chat: str):
-        def _cb(msg: Any, chat_obj: Any = None) -> None:
-            try:
-                name = self._chat_name(chat_obj) or chat
-                m = self._normalize(name, msg, allow_download=True)
-                if m:
-                    self._q.put(m)
-            except Exception:
-                log.exception("处理群「%s」的消息回调时出错", chat)
-
-        return _cb
-
-    @staticmethod
-    def _chat_name(chat_obj: Any) -> str:
-        if chat_obj is None:
-            return ""
-        if isinstance(chat_obj, str):
-            return chat_obj
-        for attr in ("chat_name", "who", "nickname", "name"):
-            v = getattr(chat_obj, attr, None)
-            if isinstance(v, str) and v:
-                return v
-        return ""
-
-    # ---------- 轮询模式（免费版） ---------- #
+    # ---------- 轮询 ---------- #
     def _poll_chat(self, chat: str, baseline: bool = False) -> list[WxMessage]:
         """打开某个群，取全部消息，返回未见过的新消息。baseline=True 时只记录不返回。"""
         try:
@@ -322,21 +245,18 @@ class WxAuto4Source(BaseSource):
             seen.add(key)
             if baseline:
                 continue
-            # 免费版下载文件会失败，这里不尝试 download（allow_download=False）
-            m = self._normalize(chat, msg, allow_download=False)
+            m = self._normalize(chat, msg)
             if m:
                 out.append(m)
 
-        # 控制 seen 体积（长会话）
-        if len(seen) > 4000:
+        if len(seen) > 4000:  # 控制长会话的内存
             self._seen[chat] = set(list(seen)[-2000:])
         if baseline:
-            self._baselined.add(chat)
             log.info("群「%s」建立基线：已有 %d 条历史消息不再上报", chat, len(seen))
         return out
 
     # ---------- 归一化 ---------- #
-    def _normalize(self, chat: str, msg: Any, allow_download: bool) -> WxMessage | None:
+    def _normalize(self, chat: str, msg: Any) -> WxMessage | None:
         attr = str(getattr(msg, "attr", "") or "").lower()
         mtype = str(getattr(msg, "type", "") or "").lower()
         if attr == "system" or mtype in V4_SKIP_TYPES:
@@ -361,20 +281,13 @@ class WxAuto4Source(BaseSource):
                 wx_time = str(v)
                 break
 
-        file_path = None
-        is_file_like = mtype == "file" or (mtype in ("image", "video") and self.save_pic)
-        if is_file_like:
-            if allow_download:
-                file_path = self._download(msg, mtype)
-            elif mtype == "file" and not self._file_warned:
-                self._file_warned = True
-                log.warning(
-                    "收到文件消息，但免费版 wxauto4 无法下载文件（download 是 Plus 专属）。"
-                    "请配置 monitor.wechat_file_dir 让目录监视器捕获方案文件，或升级 Plus 版。"
-                )
-            if file_path and not content:
-                content = f"[{'文件' if mtype == 'file' else '图片'}] {Path(file_path).name}"
-
+        # 免费版不能下载文件；文件消息只记录，实际文件走 FolderWatchSource
+        if mtype == "file" and not self._file_warned:
+            self._file_warned = True
+            log.warning(
+                "收到文件消息，免费版 wxauto4 无法下载文件。"
+                "方案文件请靠 monitor.wechat_file_dir 目录监视捕获（微信里开自动下载）。"
+            )
         if not content and mtype != "text":
             content = f"[{mtype}]"
 
@@ -384,7 +297,7 @@ class WxAuto4Source(BaseSource):
             msg_type=mtype or "text",
             content=content.strip(),
             wx_time=wx_time,
-            file_path=file_path,
+            file_path=None,
             raw_type=attr or mtype,
         )
         native = getattr(msg, "id", None) or getattr(msg, "hash", None)
@@ -393,88 +306,15 @@ class WxAuto4Source(BaseSource):
             if native
             else m.compute_local_id()
         )
-        if not m.content and not m.file_path:
+        if not m.content:
             return None
         return m
 
-    def _download(self, msg: Any, mtype: str) -> str | None:
-        download = getattr(msg, "download", None)
-        if not callable(download):
-            return None
-        kwargs: dict[str, Any] = {}
-        if self.download_dir:
-            kwargs["dir_path"] = str(self.download_dir)
-        for attempt in (kwargs, {}):
-            try:
-                res = download(**attempt)
-            except TypeError:
-                continue
-            except Exception as exc:  # noqa: BLE001
-                log.warning("下载%s失败：%s", mtype, exc)
-                return None
-            path = self._extract_path(res) or self._extract_path(getattr(msg, "path", None))
-            if path:
-                return path
-            log.warning("download() 返回 %r，未取得可用文件路径", res)
-            return None
-        return None
-
-    @staticmethod
-    def _extract_path(res: Any) -> str | None:
-        if isinstance(res, str) and os.path.isfile(res):
-            return res
-        if isinstance(res, (list, tuple)):
-            for item in res:
-                if isinstance(item, str) and os.path.isfile(item):
-                    return item
-        if isinstance(res, dict):
-            for key in ("data", "path", "file_path", "message"):
-                v = res.get(key)
-                if isinstance(v, str) and os.path.isfile(v):
-                    return v
-                if isinstance(v, dict):
-                    for k2 in ("path", "file_path"):
-                        v2 = v.get(k2)
-                        if isinstance(v2, str) and os.path.isfile(v2):
-                            return v2
-        for attr in ("path", "file_path", "data"):
-            v = getattr(res, attr, None)
-            if isinstance(v, str) and os.path.isfile(v):
-                return v
-        return None
-
-    # ---------- 取消息 ---------- #
     def poll(self) -> list[WxMessage]:
-        if self.use_listen:
-            out: list[WxMessage] = []
-            while True:
-                try:
-                    out.append(self._q.get_nowait())
-                except queue.Empty:
-                    break
-            if not out:
-                self._check_alive()
-            return out
-        # 轮询模式：逐个群取新消息
-        out = []
+        out: list[WxMessage] = []
         for chat in self.chats:
             out.extend(self._poll_chat(chat, baseline=False))
         return out
-
-    def _check_alive(self) -> None:
-        fn = getattr(self.wx, "IsOnline", None)
-        if not callable(fn):
-            return
-        try:
-            ok = bool(fn())
-        except Exception:  # noqa: BLE001
-            ok = False
-        if ok:
-            self._errors = 0
-        else:
-            self._errors += 1
-            if self._errors in (5, 30) or (self._errors and self._errors % 120 == 0):
-                log.warning("微信疑似离线/未响应（连续 %d 次探活失败）", self._errors)
 
     def health(self) -> dict[str, Any]:
         alive = None
@@ -486,21 +326,11 @@ class WxAuto4Source(BaseSource):
                 alive = False
         return {
             "source": self.name,
-            "package": self.pkg,
-            "mode": "listen" if self.use_listen else "poll",
+            "package": "wxauto4",
+            "mode": "poll",
             "chats": self.chats,
             "wechat_online": alive,
-            "queued": self._q.qsize() if self.use_listen else 0,
         }
-
-    def stop(self) -> None:
-        for meth in ("StopListening",):
-            fn = getattr(self.wx, meth, None)
-            if callable(fn):
-                try:
-                    fn()
-                except Exception:  # noqa: BLE001
-                    pass
 
 
 # --------------------------------------------------------------------------- #
@@ -509,8 +339,8 @@ class WxAuto4Source(BaseSource):
 class FolderWatchSource(BaseSource):
     """盯一个目录，新出现的方案文件（docx/xlsx/pdf/...）当作一条文件消息上报。
 
-    用于免费版 wxauto4 无法 download() 的情况：让微信自动下载群文件到某目录
-    （微信设置里可开自动下载，或用户手动下载后落到默认目录），本源负责捕获。
+    用于免费版 wxauto4 无法下载文件的情况：让微信自动下载群文件到某目录
+    （微信设置里开自动下载，或用户手动下载后落到默认目录），本源负责捕获。
     因为拿不到"谁在哪个群发的"，chat/sender 用配置里的占位值。
     """
 
@@ -531,7 +361,7 @@ class FolderWatchSource(BaseSource):
         self.suffixes = {s.lower() for s in (suffixes or DOC_SUFFIXES)}
         self.recursive = recursive
         self.stable_seconds = stable_seconds
-        self._seen: set[str] = set()          # 已上报文件的 key(size+mtime+path)
+        self._seen: set[str] = set()          # 已上报文件的 key(size+path)
         self._pending: dict[str, float] = {}  # 路径 -> 首次见到的时间（等文件写完）
 
     def _iter_files(self):
@@ -549,7 +379,6 @@ class FolderWatchSource(BaseSource):
         if not self.dir.exists():
             log.warning("目录监视：路径不存在（暂时）：%s（出现后会自动开始捕获）", self.dir)
         else:
-            # 基线：已有文件不补报
             for p in self._iter_files():
                 self._seen.add(self._key(p))
             log.info("目录监视启动：%s（已有 %d 个文件设为基线）", self.dir, len(self._seen))
@@ -571,8 +400,7 @@ class FolderWatchSource(BaseSource):
             current.add(key)
             if key in self._seen:
                 continue
-            # 等文件大小稳定（避免上传下载到一半的文件）
-            first = self._pending.setdefault(key, now)
+            first = self._pending.setdefault(key, now)  # 等文件大小稳定
             if now - first < self.stable_seconds:
                 continue
             self._seen.add(key)
@@ -589,7 +417,6 @@ class FolderWatchSource(BaseSource):
             m.local_id = m.compute_local_id()
             out.append(m)
             log.info("目录监视捕获文件：%s", p.name)
-        # 清理已消失的 pending
         self._pending = {k: v for k, v in self._pending.items() if k in current}
         return out
 
@@ -629,7 +456,7 @@ class CompositeSource(BaseSource):
 
 
 # --------------------------------------------------------------------------- #
-# 微信 3.9.x：老版 wxauto（轮询式）
+# 微信 3.9.x：老版 wxauto（免费，轮询式）
 # --------------------------------------------------------------------------- #
 class WxAutoLegacySource(BaseSource):
     name = "wxauto"
@@ -837,7 +664,6 @@ def build_source(cfg) -> BaseSource:
         return MockSource(cfg.abs_path(mock_dir or "mock_in"))
 
     save_pic = bool(cfg.monitor.get("save_pic", False))
-    download_dir = cfg.abs_path(cfg.runtime.get("download_dir") or "data/downloads")
     file_dir = cfg.monitor.get("wechat_file_dir")
 
     if backend == "wxauto":
@@ -845,7 +671,7 @@ def build_source(cfg) -> BaseSource:
 
     if backend in ("wxauto4", "auto"):
         if backend == "auto":
-            # 没装 4.x 包但装了老 wxauto 时回退
+            # 没装 wxauto4 但装了老 wxauto(3.9) 时回退
             try:
                 WxAuto4Source.import_wechat()
             except RuntimeError as exc:
@@ -856,11 +682,7 @@ def build_source(cfg) -> BaseSource:
                 log.warning("未找到 wxauto4，回退到老版 wxauto（仅微信 3.9.x）")
                 return WxAutoLegacySource(save_pic=save_pic)
 
-        wx = WxAuto4Source(
-            save_pic=save_pic,
-            download_dir=download_dir,
-            mode=str(cfg.monitor.get("poll_mode", "auto")).lower(),
-        )
+        wx = WxAuto4Source(save_pic=save_pic)
         if file_dir:
             watcher = FolderWatchSource(
                 cfg.abs_path(file_dir),

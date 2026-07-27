@@ -23,11 +23,9 @@ DEFAULTS: dict[str, Any] = {
         "verify_ssl": True,
     },
     "monitor": {
-        # auto = 优先用微信 4.1+ 的 wxauto4/wxautox4，找不到才回退老版 wxauto(3.9.x)
+        # auto = 用微信 4.1+ 的免费版 wxauto4，找不到才回退老版 wxauto(3.9.x)
         # 可选：auto | wxauto4 | wxauto | mock
         "backend": "auto",
-        # wxauto4 监听方式：auto=有 AddListenChat(Plus) 就回调，否则轮询；listen|poll 强制
-        "poll_mode": "auto",
         # 免费版 wxauto4 无法下载群文件，填微信"文件下载目录"让目录监视器捕获方案文件
         # 例：C:\\Users\\你\\Documents\\xwechat_files\\<wxid>\\msg\\file
         "wechat_file_dir": "",

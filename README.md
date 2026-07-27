@@ -12,23 +12,19 @@
 - Python **3.9–3.12**（wxauto4 免费版的限制）
 - 微信窗口不要最小化到托盘、不要锁屏；建议用一台常开的机器/云桌面专门跑
 
-按微信版本选后端（`config.yaml` 的 `monitor.backend`，默认 `auto` 会自动选）：
+**本项目只用免费版**（`wxauto4`），不使用、也不安装 Plus 版 `wxautox4`。
 
-| 微信客户端版本 | 装哪个包 | 监听方式 | 能否下载群文件 |
+| 微信客户端版本 | 装哪个包 | 监听方式 | 群文件 |
 |---|---|---|---|
-| **4.1.8.107**（当前在用）| `pip install wxauto4`（免费版）| **轮询** `ChatWith`+`GetAllMessage` | ❌ 不能，靠目录监视 |
-| 4.1.9.35 及更新 | `pip install wxautox4` + 激活码（Plus）| 回调 `AddListenChat` | ✅ `download()` |
-| 3.9.x | `pip install wxauto` | 轮询 `GetListenMessage` | ✅ |
+| **4.1.8.107**（当前在用）| `pip install wxauto4`（免费）| **轮询** `ChatWith`+`GetAllMessage` | 目录监视捕获 |
+| 3.9.x | `pip install wxauto` | 轮询 `GetListenMessage` | wxauto 自带下载 |
 
-> ⚠️ **重要：免费版 wxauto4 的两个限制**（`AddListenChat`、`FileMessage.download()` 都是 Plus 专属）：
-> 1. **没有后台监听** → 程序自动改用轮询：每隔 `poll_interval` 秒挨个 `ChatWith(群)` 再
+> ⚠️ **免费版 wxauto4 的两个限制**（`AddListenChat`、`FileMessage.download()` 都是 Plus 专属，本项目不用）：
+> 1. **没有后台监听** → 用轮询：每隔 `poll_interval` 秒（默认 10s）挨个 `ChatWith(群)` 再
 >    `GetAllMessage()` 比对出新消息。副作用：会来回切换微信当前聊天窗口，属正常现象。
-> 2. **不能下载群文件** → 方案文件改由**目录监视**捕获：在微信设置里开启「自动下载」，
+> 2. **不能下载群文件** → 方案文件由**目录监视**捕获：在微信设置里开启「自动下载」，
 >    并把微信文件保存目录填到 `monitor.wechat_file_dir`（见下），程序会自动上传里面新出现的
 >    方案文件（docx/xlsx/pdf…）。
->
-> 想要回调式监听 + 直接下载文件，就装 **Plus 版 `wxautox4`**（付费激活），代码会自动优先用它，
-> 那时 `wechat_file_dir` 可留空。
 
 ### 配置微信文件目录（免费版必做，否则收不到方案文件）
 
@@ -110,14 +106,11 @@ python -m wxclient.main --config D:\conf\client.yaml
 
 ## 工作方式
 
-1. `wx_adapter.py` 监听群消息，按能力探测选路径：
-   - **wxauto4 免费版（微信 4.1.8.107）**：没有 `AddListenChat`，改**轮询** `ChatWith(群)`+`GetAllMessage()`，
+1. `wx_adapter.py` 监听群消息：
+   - **wxauto4 免费版（微信 4.1.8.107）**：**轮询** `ChatWith(群)`+`GetAllMessage()`，
      用消息 `id/hash` 比对出新消息（首轮建基线，不补历史）；文件由 `FolderWatchSource` 监视
-     `wechat_file_dir` 捕获。
-   - **wxautox4 Plus 版**：`AddListenChat(nickname=群名, callback=fn)` 回调式，回调塞进线程安全队列；
-     文件用 `msg.download(dir_path=...)`，返回 str/list/WxResponse 三种形态都兼容。
+     `wechat_file_dir` 捕获。消息来源用 `msg.attr`（system/self/friend），内容类型用 `msg.type`。
    - **wxauto（微信 3.9.x）**：轮询 `GetListenMessage()`。
-   - 消息来源判断：4.x 用 `msg.attr`（system/self/friend），内容类型用 `msg.type`。
 2. 每条消息算一个 `local_id`（有原生消息 id 用它，否则用 群+人+内容+分钟 的哈希）做去重。
 3. 消息/文件先进本地 SQLite 队列 `data/outbox.db`，再由上报线程发送；
    **断网、服务端重启、微信卡死都不会丢消息**，恢复后按序补发（指数退避，最长 5 分钟一次）。
@@ -148,7 +141,7 @@ monitor:
 | `未安装微信 4.x 版的 wxauto` | `pip install wxauto4`（微信 4.1.8.107）；非 Windows 请用 `--mock-dir` |
 | 日志里「免费版无法下载群文件」 | 正常。免费版 `download()` 是 Plus 专属；配 `monitor.wechat_file_dir` + 微信开自动下载即可捕获文件 |
 | 收到方案文件但服务端没收到 | 检查 `wechat_file_dir` 路径对不对、微信是否真把文件下到了那里；日志应有「目录监视捕获文件」 |
-| 微信窗口一直被切来切去 | 免费版轮询模式的正常现象（挨个 `ChatWith`）；装 Plus 版 `wxautox4` 走回调就不切了 |
+| 微信窗口一直被切来切去 | 免费版轮询模式的正常现象（挨个 `ChatWith`）；可把 `poll_interval` 调大一点减少频率 |
 | 装了 `wxauto` 但连不上微信 4.x | 老包只支持 3.9.x，换 `wxauto4` |
 | `ImportError` / 安装失败 | wxauto4 免费版只支持 Python 3.9–3.12，3.13 装不上 |
 | `监听群「xxx」失败` / 收不到消息 | 群名与微信显示不一致（有空格、emoji），或该群不在会话列表里；先在微信里打开一次这个群。`test_link.py` 会列出可见会话并提示相近的名字 |
