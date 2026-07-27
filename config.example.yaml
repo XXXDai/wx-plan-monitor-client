@@ -7,6 +7,8 @@ server:
   verify_ssl: true
 
 monitor:
+  # 微信 4.1+（如 4.1.8.107）用 wxauto4；微信 3.9.x 用 wxauto；auto = 自动选
+  backend: auto                           # auto | wxauto4 | wxauto | mock
   chats:                                  # 要监听的群名，必须与微信窗口里显示的完全一致
     - 套保方案群
   poll_interval: 2                        # 拉取新消息的间隔（秒）
@@ -27,6 +29,7 @@ monitor:
 runtime:
   db_path: data/outbox.db                 # 本地待发队列（断网不丢消息）
   log_file: data/client.log
+  download_dir: data/downloads            # wxauto4 把群文件下载到这里
   batch_size: 20
   send_interval: 3
   max_attempts: 0                         # 0 = 一直重试

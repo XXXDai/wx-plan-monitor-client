@@ -23,6 +23,9 @@ DEFAULTS: dict[str, Any] = {
         "verify_ssl": True,
     },
     "monitor": {
+        # auto = 优先用微信 4.1+ 的 wxauto4/wxautox4，找不到才回退老版 wxauto(3.9.x)
+        # 可选：auto | wxauto4 | wxauto | mock
+        "backend": "auto",
         "chats": [],  # 要监听的群名（必须与微信里显示的名称完全一致）
         "poll_interval": 2,  # 秒
         "upload_suffixes": [".docx", ".doc", ".xlsx", ".xls", ".pdf", ".txt", ".md", ".csv"],
@@ -34,6 +37,7 @@ DEFAULTS: dict[str, Any] = {
     "runtime": {
         "db_path": "data/outbox.db",
         "log_file": "data/client.log",
+        "download_dir": "data/downloads",  # wxauto4 下载群文件的落地目录
         "batch_size": 20,
         "send_interval": 3,  # 上报线程轮询间隔（秒）
         "max_attempts": 0,  # 0 = 无限重试（一直放在队列里）

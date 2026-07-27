@@ -23,12 +23,10 @@ from typing import Any
 from .config import Config, load_config
 from .outbox import Outbox
 from .uploader import Uploader, UploadError
-from .wx_adapter import BaseSource, WxMessage, build_source
+from .wx_adapter import IMAGE_SUFFIXES, BaseSource, WxMessage, build_source
 
 log = logging.getLogger("client")
 _stop = threading.Event()
-
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 
 def setup_logging(cfg: Config) -> None:
@@ -266,7 +264,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if platform.system() != "Windows" and not cfg.runtime.get("mock_dir"):
         log.error(
-            "wxauto 只能在 Windows 上运行。本机调试请加 --mock-dir mock_in 走模拟模式。"
+            "wxauto/wxauto4 只能在 Windows 上运行（微信 4.1.8.107 请用 pip install wxauto4）。"
+            "本机调试请加 --mock-dir mock_in 走模拟模式。"
         )
         return 2
 
@@ -308,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
     except Exception:
         log.exception("退出前清队列失败，数据仍保留在本地 outbox.db 中")
+    source.stop()
     box.close()
     log.info("已退出。采集统计：%s", collector.stats)
     return 0

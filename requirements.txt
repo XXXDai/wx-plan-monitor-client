@@ -1,4 +1,13 @@
 requests>=2.31
 PyYAML>=6.0
-# wxauto 只在 Windows 上安装/运行（macOS、Linux 请用 --mock-dir 模拟模式调试）
-wxauto>=3.9.11; sys_platform == "win32"
+
+# 微信 4.1+（含 4.1.8.107）：免费版 wxauto4，仅 Windows + Python 3.9-3.12
+wxauto4>=41.1.0; sys_platform == "win32"
+
+# Plus 版（支持到微信 4.1.9.35，需激活码）：注释掉上面一行，改用
+# wxautox4; sys_platform == "win32"
+
+# 微信 3.9.x 的老客户端（同时把 config.yaml 的 monitor.backend 设为 wxauto）：
+# wxauto>=3.9.11; sys_platform == "win32"
+
+# macOS / Linux 上装不了以上任何一个，用 --mock-dir 模拟模式调试
