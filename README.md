@@ -95,6 +95,7 @@ python tools/test_link.py                    # 链路自检（排障第一步）
 python tools/test_link.py --alert --file 方案.docx   # 连报警和解析一起验
 python tools/test_link.py --skip-wx          # 只测服务端
 python tools/test_adapter.py                 # wxauto4 适配层离线自测（改适配层后跑）
+python tools/test_upload.py                  # 用本机 config.yaml 的真实密钥测试公网消息上报
 
 python -m wxclient.main                      # 正常运行
 python -m wxclient.main --ping               # 只测服务端连通性 + 签名
