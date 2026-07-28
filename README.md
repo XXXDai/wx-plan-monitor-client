@@ -56,12 +56,14 @@ notepad config.yaml
 
 ```yaml
 server:
-  base_url: http://你的服务器:8000    # 建议上 HTTPS
+  base_url: http://monitor.xdai.top   # 公网入口；不需要 VPN，勿填 47.237.103.27:13000
   client_id: wx-pc-1                 # 与服务端 server.clients 的 key 一致
   secret: 与服务端一致的长随机串       # 也可用环境变量 BARK_CLIENT_SECRET
 monitor:
   backend: auto                      # 微信 4.1.8.107 会自动选 wxauto4
-  chats: ["套保方案群"]               # 群名必须与微信里显示的完全一致
+  chats: ["策略之BTC基金"]             # 群名必须与微信里显示的完全一致
+  ignore_self: false                    # XDai 自己发的消息也上报，保留完整上下文
+  self_sender: XDai                     # 服务端按交易员 XDai 识别自消息
 ```
 
 **装完先自检**（强烈建议，能一次性定位 90% 的问题）：
@@ -111,7 +113,7 @@ python -m wxclient.main --config D:\conf\client.yaml
      用消息 `id/hash` 比对出新消息（首轮建基线，不补历史）；文件由 `FolderWatchSource` 监视
      `wechat_file_dir` 捕获。消息来源用 `msg.attr`（system/self/friend），内容类型用 `msg.type`。
    - **wxauto（微信 3.9.x）**：轮询 `GetListenMessage()`。
-2. 每条消息算一个 `local_id`（有原生消息 id 用它，否则用 群+人+内容+分钟 的哈希）做去重。
+2. 每条消息算一个 `local_id`（有原生消息 id 用它，否则用 群+人+内容+分钟 的哈希）做去重。默认连 XDai 自己的消息也会上报，并按 `self_sender` 写为 `XDai`，让服务端能理解群内对话角色。
 3. 消息/文件先进本地 SQLite 队列 `data/outbox.db`，再由上报线程发送；
    **断网、服务端重启、微信卡死都不会丢消息**，恢复后按序补发（指数退避，最长 5 分钟一次）。
 4. 每 2 分钟发一次心跳（含主机名、队列积压、监听的群），服务端 `/api/v1/status` 能看到。

@@ -23,6 +23,7 @@ from wxclient.wx_adapter import (  # noqa: E402
     _is_failure,
     _msg_key,
 )
+from wxclient.main import Collector  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="wx-adapter-"))
 SAMPLE = TMP / "套保方案清单0724.docx"
@@ -87,6 +88,41 @@ check("空消息被忽略", src._normalize("群", Msg(content="")) is None)
 
 m = src._normalize("群", Msg(attr="self", content="我自己发的"))
 check("自己发的消息标记为「我」", m and m.sender == "我" and m.raw_type == "self", str(m))
+
+
+class _CollectorCfg:
+    monitor = {
+        "ignore_self": False,
+        "self_sender": "XDai",
+        "send_text": True,
+        "senders_only": [],
+        "upload_suffixes": [],
+    }
+
+
+class _CollectorBox:
+    def __init__(self):
+        self.seen: set[str] = set()
+        self.rows: list[dict] = []
+
+    def is_seen(self, local_id):
+        return local_id in self.seen
+
+    def mark_seen(self, local_id):
+        self.seen.add(local_id)
+
+    def put(self, kind, payload, file_path=None):
+        self.rows.append({"kind": kind, "payload": payload, "file_path": file_path})
+
+
+collector_box = _CollectorBox()
+collector = Collector(_CollectorCfg(), src, collector_box)
+collector.handle(m)
+check(
+    "自己的消息会以上传身份 XDai 入队",
+    len(collector_box.rows) == 1 and collector_box.rows[0]["payload"]["sender"] == "XDai",
+    str(collector_box.rows),
+)
 
 m = src._normalize("群", Msg(type="image", content="", id="i1"))
 check("图片记录为 [image]（免费版不下载）", m and m.msg_type == "image" and m.content == "[image]", str(m))

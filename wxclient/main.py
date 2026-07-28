@@ -67,6 +67,14 @@ class Collector:
             return False  # 图片不做解析，只当普通消息记录
         return (not self.suffixes) or suffix in self.suffixes
 
+    def _sender_for_upload(self, m: WxMessage) -> str:
+        """自消息用稳定的业务名称上报，避免服务端只看到“我”而无法识别角色。"""
+        if m.raw_type == "self":
+            configured = str(self.cfg.monitor.get("self_sender") or "").strip()
+            if configured:
+                return configured
+        return m.sender
+
     def handle(self, m: WxMessage) -> None:
         if self.box.is_seen(m.local_id):
             return
@@ -76,10 +84,12 @@ class Collector:
             self.box.mark_seen(m.local_id)
             return
 
+        sender = self._sender_for_upload(m)
+
         payload = {
             "local_id": m.local_id,
             "chat": m.chat,
-            "sender": m.sender,
+            "sender": sender,
             "msg_type": m.msg_type,
             "content": m.content,
             "wx_time": m.wx_time,
@@ -90,12 +100,12 @@ class Collector:
             self.stats["files"] += 1
             log.info("入队【文件】%s / %s：%s", m.chat, m.sender, Path(m.file_path).name)
         elif self.cfg.monitor.get("send_text", True) and (
-            not self.senders_only or m.sender in self.senders_only
+            not self.senders_only or sender in self.senders_only
         ):
             self.box.put("message", payload)
             self.stats["messages"] += 1
             log.info(
-                "入队【消息】%s / %s：%s", m.chat, m.sender, (m.content or "")[:60].replace("\n", " ")
+                "入队【消息】%s / %s：%s", m.chat, sender, (m.content or "")[:60].replace("\n", " ")
             )
         else:
             self.stats["skipped"] += 1

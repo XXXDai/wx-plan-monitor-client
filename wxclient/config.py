@@ -16,7 +16,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 DEFAULTS: dict[str, Any] = {
     "server": {
-        "base_url": "http://127.0.0.1:8000",
+        "base_url": "http://monitor.xdai.top",
         "client_id": "wx-pc-1",
         "secret": "",
         "timeout": 30,
@@ -29,12 +29,13 @@ DEFAULTS: dict[str, Any] = {
         # 免费版 wxauto4 无法下载群文件，填微信"文件下载目录"让目录监视器捕获方案文件
         # 例：C:\\Users\\你\\Documents\\xwechat_files\\<wxid>\\msg\\file
         "wechat_file_dir": "",
-        "chats": [],  # 要监听的群名（必须与微信里显示的名称完全一致）
+        "chats": ["策略之BTC基金"],  # 要监听的群名（必须与微信里显示的名称完全一致）
         "poll_interval": 10,  # 秒，每隔多久轮询一次群消息
         "upload_suffixes": [".docx", ".doc", ".xlsx", ".xls", ".pdf", ".txt", ".md", ".csv"],
         "send_text": True,  # 是否上报文本消息
         "senders_only": [],  # 非空时只上报这些人的文本消息（文件永远上报）
-        "ignore_self": True,  # 忽略自己发的消息
+        "ignore_self": False,  # 默认也上报自己发的消息，供服务端理解完整上下文
+        "self_sender": "XDai",  # 自己发言上传到服务端时使用的名称；留空则沿用微信返回的名称
         "save_pic": False,  # 是否让 wxauto 下载图片（图片不解析，默认关）
     },
     "runtime": {
