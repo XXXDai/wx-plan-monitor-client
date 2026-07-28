@@ -24,6 +24,7 @@ from wxclient.wx_adapter import (  # noqa: E402
     _msg_key,
 )
 from wxclient.main import Collector  # noqa: E402
+from wxclient.config import load_config  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="wx-adapter-"))
 SAMPLE = TMP / "套保方案清单0724.docx"
@@ -122,6 +123,23 @@ check(
     "自己的消息会以上传身份 XDai 入队",
     len(collector_box.rows) == 1 and collector_box.rows[0]["payload"]["sender"] == "XDai",
     str(collector_box.rows),
+)
+
+legacy_config = TMP / "legacy-config.yaml"
+legacy_config.write_text(
+    "server:\n  base_url: http://47.237.103.27:13000\n  secret: keep-local\n"
+    "monitor:\n  chats: [套保方案群]\n  ignore_self: true\n  self_sender: 我\n",
+    encoding="utf-8",
+)
+loaded = load_config(legacy_config)
+check(
+    "旧本地配置会自动迁移到 Git 固定的公网监听设置",
+    loaded.server["base_url"] == "http://monitor.xdai.top"
+    and loaded.monitor["chats"] == ["策略之BTC基金"]
+    and loaded.monitor["ignore_self"] is False
+    and loaded.monitor["self_sender"] == "XDai"
+    and loaded.server["secret"] == "keep-local",
+    str(loaded._data),
 )
 
 m = src._normalize("群", Msg(type="image", content="", id="i1"))

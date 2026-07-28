@@ -13,10 +13,16 @@ from typing import Any
 import yaml
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+PUBLIC_SERVER_URL = "http://monitor.xdai.top"
+MANAGED_MONITOR = {
+    "chats": ["策略之BTC基金"],
+    "ignore_self": False,
+    "self_sender": "XDai",
+}
 
 DEFAULTS: dict[str, Any] = {
     "server": {
-        "base_url": "http://monitor.xdai.top",
+        "base_url": PUBLIC_SERVER_URL,
         "client_id": "wx-pc-1",
         "secret": "",
         "timeout": 30,
@@ -99,5 +105,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         data["server"]["secret"] = v
     if v := os.getenv("WXCLIENT_MOCK_DIR"):
         data["runtime"]["mock_dir"] = v
+
+    # 这四项是当前生产客户端的固定行为，避免旧 config.yaml 继续监听旧群或忽略 XDai 的发言。
+    # 凭证（client_id/secret）和本地文件目录仍保留在不入库的 config.yaml / 环境变量中。
+    data["server"]["base_url"] = PUBLIC_SERVER_URL
+    data["monitor"].update(copy.deepcopy(MANAGED_MONITOR))
 
     return Config(data, p if p.exists() else None)

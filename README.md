@@ -52,7 +52,7 @@ copy config.example.yaml config.yaml
 notepad config.yaml
 ```
 
-`config.yaml` 至少要改三处：
+`config.yaml` 只需要保留本机凭证和微信文件目录：
 
 ```yaml
 server:
@@ -60,11 +60,13 @@ server:
   client_id: wx-pc-1                 # 与服务端 server.clients 的 key 一致
   secret: 与服务端一致的长随机串       # 也可用环境变量 BARK_CLIENT_SECRET
 monitor:
-  backend: auto                      # 微信 4.1.8.107 会自动选 wxauto4
-  chats: ["策略之BTC基金"]             # 群名必须与微信里显示的完全一致
-  ignore_self: false                    # XDai 自己发的消息也上报，保留完整上下文
-  self_sender: XDai                     # 服务端按交易员 XDai 识别自消息
+  wechat_file_dir: "C:\\Users\\你的用户名\\Documents\\xwechat_files\\...\\msg\\file"
 ```
+
+当前生产客户端把 `server.base_url`、监听群、自消息开关和 `self_sender` 固定在 Git 代码里：
+拉取新版后即使本地 `config.yaml` 仍是旧值，也会自动使用 `http://monitor.xdai.top`、
+`策略之BTC基金`、`ignore_self: false` 和 `XDai`。本地文件只保留 `client_id`、`secret` 和微信下载目录，
+因为这些不能提交到 Git。
 
 **装完先自检**（强烈建议，能一次性定位 90% 的问题）：
 
