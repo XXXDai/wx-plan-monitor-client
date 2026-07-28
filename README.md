@@ -68,6 +68,8 @@ monitor:
 `策略之BTC基金`、`ignore_self: false` 和 `XDai`。本地文件只保留 `client_id`、`secret` 和微信下载目录，
 因为这些不能提交到 Git。
 
+Windows 启动用 `cmd /c run.bat`。脚本会自动切换 UTF-8 控制台代码页，避免中文日志乱码。
+
 **装完先自检**（强烈建议，能一次性定位 90% 的问题）：
 
 ```bat
