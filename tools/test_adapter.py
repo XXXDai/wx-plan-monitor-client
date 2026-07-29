@@ -24,7 +24,7 @@ from wxclient.wx_adapter import (  # noqa: E402
     _msg_key,
 )
 from wxclient.main import Collector  # noqa: E402
-from wxclient.config import load_config  # noqa: E402
+from wxclient.config import _default_wechat_file_dir, load_config  # noqa: E402
 
 TMP = Path(tempfile.mkdtemp(prefix="wx-adapter-"))
 SAMPLE = TMP / "套保方案清单0724.docx"
@@ -140,6 +140,14 @@ check(
     and loaded.monitor["self_sender"] == "XDai"
     and loaded.server["secret"] == "keep-local",
     str(loaded._data),
+)
+
+auto_dir = TMP / "Documents" / "xwechat_files"
+auto_dir.mkdir(parents=True)
+check(
+    "Windows 自动发现微信文件根目录",
+    _default_wechat_file_dir(TMP, is_windows=True) == str(auto_dir),
+    _default_wechat_file_dir(TMP, is_windows=True),
 )
 
 m = src._normalize("群", Msg(type="image", content="", id="i1"))

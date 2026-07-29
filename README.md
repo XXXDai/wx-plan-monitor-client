@@ -28,20 +28,20 @@
 
 ### 配置微信文件目录（免费版必做，否则收不到方案文件）
 
-微信 4.x 收到的群文件默认存在类似这个路径（先在微信「设置 → 文件管理」确认你的实际目录）：
+微信 4.x 收到的群文件默认在这个目录下（客户端会递归扫描子目录，先在微信「设置 → 文件管理」确认）：
 
 ```
-C:\Users\你的用户名\Documents\xwechat_files\wxid_xxxxxx\msg\file
+C:\Users\你的用户名\Documents\xwechat_files
 ```
 
 填进 `config.yaml`：
 
 ```yaml
 monitor:
-  wechat_file_dir: "C:\\Users\\你的用户名\\Documents\\xwechat_files\\wxid_xxxxxx\\msg\\file"
+  wechat_file_dir: "C:\\Users\\你的用户名\\Documents\\xwechat_files"
 ```
 
-并在微信里开启群文件「自动下载」（或每次手动点一下下载），文件落盘后本客户端会在几秒内捕获并上传。
+也可留空：Windows 客户端会自动使用上述默认目录。开启群文件「自动下载」后，客户端运行期间新落盘的文件会在几秒内捕获并上传。启动客户端前已经存在的文件会作为历史基线保留，不会批量上传；需要补传时可在客户端运行后重新下载该文件，或使用 `--send-file` 手工补传。
 
 ## 安装
 
@@ -60,7 +60,7 @@ server:
   client_id: wx-pc-1                 # 与服务端 server.clients 的 key 一致
   secret: 与服务端一致的长随机串       # 也可用环境变量 BARK_CLIENT_SECRET
 monitor:
-  wechat_file_dir: "C:\\Users\\你的用户名\\Documents\\xwechat_files\\...\\msg\\file"
+  wechat_file_dir: "C:\\Users\\你的用户名\\Documents\\xwechat_files"
 ```
 
 当前生产客户端把 `server.base_url`、监听群、自消息开关和 `self_sender` 固定在 Git 代码里：

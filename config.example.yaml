@@ -12,7 +12,8 @@ monitor:
   # ⚠️ 免费版 wxauto4 无法下载群文件！方案文件靠"目录监视"捕获：
   #   1) 在微信设置里开启"自动下载"，或收到后手动下载
   #   2) 把微信文件保存目录填到这里，程序会自动上传里面新出现的方案文件
-  #   例（4.x 默认）：C:\Users\你的用户名\Documents\xwechat_files\wxid_xxx\msg\file
+  #   可直接填根目录（递归扫描）：C:\Users\你的用户名\Documents\xwechat_files
+  #   留空时，Windows 客户端会自动使用上述默认根目录（存在才启用）。
   wechat_file_dir: ""
   chats:                                  # 要监听的群名，必须与微信窗口里显示的完全一致
     - 策略之BTC基金

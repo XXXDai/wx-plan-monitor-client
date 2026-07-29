@@ -20,6 +20,17 @@ MANAGED_MONITOR = {
     "self_sender": "XDai",
 }
 
+
+def _default_wechat_file_dir(
+    home: Path | None = None, *, is_windows: bool | None = None
+) -> str:
+    """返回微信 4.x 的默认自动下载根目录；不存在时不启用目录监听。"""
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    candidate = (home or Path.home()) / "Documents" / "xwechat_files"
+    return str(candidate) if is_windows and candidate.is_dir() else ""
+
+
 DEFAULTS: dict[str, Any] = {
     "server": {
         "base_url": PUBLIC_SERVER_URL,
@@ -110,5 +121,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     # 凭证（client_id/secret）和本地文件目录仍保留在不入库的 config.yaml / 环境变量中。
     data["server"]["base_url"] = PUBLIC_SERVER_URL
     data["monitor"].update(copy.deepcopy(MANAGED_MONITOR))
+    if not str(data["monitor"].get("wechat_file_dir") or "").strip():
+        # 微信 4.x 默认目录可直接递归监听，免去每台 Windows 客户端手写 wxid 子路径。
+        if default_dir := _default_wechat_file_dir():
+            data["monitor"]["wechat_file_dir"] = default_dir
 
     return Config(data, p if p.exists() else None)
