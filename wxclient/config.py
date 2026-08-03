@@ -15,11 +15,22 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_SERVER_URL = "http://monitor.xdai.top"
 MANAGED_MONITOR = {
-    # 「上班打卡群」只为打卡提醒服务：服务端在工作日 07:59 检查这个群里我今天发没发"打卡"。
-    # 群名必须和微信里显示的完全一致，否则 ChatWith 打不开、读不到消息。
-    "chats": ["策略之BTC基金", "上班打卡群"],
+    # 只监听交易群。打卡群不在这里——它的聊天记录不上报、不入库（见 MANAGED_CHECKIN）。
+    "chats": ["策略之BTC基金"],
     "ignore_self": False,
     "self_sender": "XDai",
+}
+
+# 上班打卡检测：工作日到点**只读一次**打卡群，本地判断我今天发没发"打卡"，
+# 只把结论（true/false）上报服务端。打卡群的聊天内容既不入队也不入库，
+# 与网页上的消息/告警功能完全分开。
+MANAGED_CHECKIN = {
+    "enabled": True,
+    "chat": "上班打卡群",     # 必须与微信显示完全一致
+    "keywords": ["打卡"],
+    "sender": "XDai",         # 只认我自己发的；留空=群里任何人发都算
+    "at_time": "07:59",       # 每个工作日这个时间点检测一次
+    "weekdays_only": True,
 }
 
 
@@ -59,6 +70,7 @@ DEFAULTS: dict[str, Any] = {
         "self_sender": "XDai",  # 自己发言上传到服务端时使用的名称；留空则沿用微信返回的名称
         "save_pic": False,  # 是否让 wxauto 下载图片（图片不解析，默认关）
     },
+    "checkin": dict(MANAGED_CHECKIN),
     "runtime": {
         "db_path": "data/outbox.db",
         "log_file": "data/client.log",
@@ -99,6 +111,10 @@ class Config:
     def runtime(self) -> dict:
         return self._data["runtime"]
 
+    @property
+    def checkin(self) -> dict:
+        return self._data.get("checkin") or {}
+
     def abs_path(self, value: str) -> Path:
         p = Path(value)
         return p if p.is_absolute() else BASE_DIR / p
@@ -125,6 +141,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     # 凭证（client_id/secret）和本地文件目录仍保留在不入库的 config.yaml / 环境变量中。
     data["server"]["base_url"] = PUBLIC_SERVER_URL
     data["monitor"].update(copy.deepcopy(MANAGED_MONITOR))
+    data["checkin"] = _deep_merge(MANAGED_CHECKIN, data.get("checkin") or {})
     if not str(data["monitor"].get("wechat_file_dir") or "").strip():
         # 微信 4.x 默认目录可直接递归监听，免去每台 Windows 客户端手写 wxid 子路径。
         if default_dir := _default_wechat_file_dir():

@@ -83,6 +83,14 @@ class BaseSource:
     def poll(self) -> list[WxMessage]:  # pragma: no cover - 接口
         raise NotImplementedError
 
+    def snapshot(self, chat: str) -> list[WxMessage] | None:
+        """一次性读某个会话的当前消息（不影响正常轮询的去重状态）。
+
+        专给"打卡检测"用：只读一次、读完就地判断，内容不入队、不上报。
+        返回 None 表示没读到（会话打不开）。
+        """
+        return None
+
     def health(self) -> dict[str, Any]:
         return {"source": self.name}
 
@@ -342,6 +350,30 @@ class WxAuto4Source(BaseSource):
                 out.extend(got)
         return out
 
+    def snapshot(self, chat: str) -> list[WxMessage] | None:
+        """只读一次该会话的当前消息，不写入 _seen（不影响正常轮询）。"""
+        if not chat:
+            return None
+        try:
+            res = self.wx.ChatWith(chat)
+            if _is_failure(res):
+                log.warning("snapshot ChatWith(%s) 失败：%s", chat, _failure_text(res))
+                return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("snapshot ChatWith(%s) 异常：%s", chat, exc)
+            return None
+        try:
+            msgs = self.wx.GetAllMessage() or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("snapshot GetAllMessage(%s) 异常：%s", chat, exc)
+            return None
+        out: list[WxMessage] = []
+        for msg in msgs:
+            m = self._normalize(chat, msg)
+            if m:
+                out.append(m)
+        return out
+
     def health(self) -> dict[str, Any]:
         alive = None
         fn = getattr(self.wx, "IsOnline", None)
@@ -472,6 +504,17 @@ class CompositeSource(BaseSource):
             except Exception:
                 log.exception("子源 %s poll 出错", s.name)
         return out
+
+    def snapshot(self, chat: str) -> list[WxMessage] | None:
+        for s in self.sources:
+            try:
+                got = s.snapshot(chat)
+            except Exception:
+                log.exception("子源 %s snapshot 出错", s.name)
+                continue
+            if got is not None:
+                return got
+        return None
 
     def health(self) -> dict[str, Any]:
         return {"source": self.name, "children": [s.health() for s in self.sources]}

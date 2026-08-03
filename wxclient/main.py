@@ -22,6 +22,7 @@ from typing import Any
 
 from .config import Config, load_config
 from .outbox import Outbox
+from .checkin import CheckinTask
 from .uploader import PermanentUploadError, Uploader, UploadError
 from .wx_adapter import IMAGE_SUFFIXES, BaseSource, WxMessage, build_source
 
@@ -51,10 +52,12 @@ def setup_logging(cfg: Config) -> None:
 # 采集
 # --------------------------------------------------------------------------- #
 class Collector:
-    def __init__(self, cfg: Config, source: BaseSource, box: Outbox):
+    def __init__(self, cfg: Config, source: BaseSource, box: Outbox,
+                 checkin: CheckinTask | None = None):
         self.cfg = cfg
         self.source = source
         self.box = box
+        self.checkin = checkin
         self.suffixes = {
             s.lower() for s in (cfg.monitor.get("upload_suffixes") or []) if s
         }
@@ -134,6 +137,9 @@ class Collector:
             try:
                 for m in self.source.poll():
                     self.handle(m)
+                # 到点做一次打卡检测（一天一次，读完就判、内容不入队）
+                if self.checkin is not None:
+                    self.checkin.maybe_run()
                 errors = 0
             except Exception:
                 errors += 1
@@ -307,7 +313,8 @@ def main(argv: list[str] | None = None) -> int:
     source = build_source(cfg)
     source.start(cfg.monitor.get("chats") or [])
 
-    collector = Collector(cfg, source, box)
+    checkin_task = CheckinTask(cfg, source, uploader) if (cfg.checkin or {}).get("enabled") else None
+    collector = Collector(cfg, source, box, checkin=checkin_task)
     sender = Sender(cfg, box, uploader)
 
     def _on_signal(signum, _frame):

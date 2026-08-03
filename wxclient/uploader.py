@@ -147,6 +147,13 @@ class Uploader:
             raise UploadError(f"网络错误：{exc}") from exc
         return self._parse(resp, api_path)
 
+    def report_checkin(self, checked_in: bool, evidence: str = "", chat: str = "") -> dict[str, Any]:
+        """上报打卡结论。只发布尔值和一小段证据文本，不发打卡群的聊天记录。"""
+        return self._post_json(
+            "/api/v1/checkin/report",
+            {"checked_in": bool(checked_in), "evidence": evidence[:200], "chat": chat},
+        )
+
     def heartbeat(self, info: dict[str, Any]) -> dict[str, Any]:
         return self._post_json("/api/v1/heartbeat", info)
 
