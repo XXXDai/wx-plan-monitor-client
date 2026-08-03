@@ -38,6 +38,8 @@ DEFAULTS: dict[str, Any] = {
         "secret": "",
         "timeout": 30,
         "verify_ssl": True,
+        # 超过这个大小的文件直接不上报（网关会 413 打回，重试也没用）；0 = 不限制
+        "max_upload_mb": 8,
     },
     "monitor": {
         # auto = 用微信 4.1+ 的免费版 wxauto4，找不到才回退老版 wxauto(3.9.x)

@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,21 @@ class UploadError(Exception):
     """可重试的上报失败。"""
 
 
+class PermanentUploadError(UploadError):
+    """重试也不会成功的失败（文件过大 413、签名/格式错误等），应直接放弃这条。"""
+
+
+def _brief(text: str, limit: int = 160) -> str:
+    """把 nginx 那种整页 HTML 错误压成一行，日志里别刷屏。"""
+    raw = (text or "").strip()
+    if "<html" in raw.lower():
+        m = re.search(r"<title>(.*?)</title>", raw, re.I | re.S)
+        if m:
+            return m.group(1).strip()
+        raw = re.sub(r"<[^>]+>", " ", raw)
+    return " ".join(raw.split())[:limit]
+
+
 class Uploader:
     def __init__(self, cfg) -> None:
         s = cfg.server
@@ -35,6 +51,8 @@ class Uploader:
         self.secret = str(s.get("secret") or "")
         self.timeout = float(s.get("timeout", 30))
         self.verify = bool(s.get("verify_ssl", True))
+        # 超过这个大小就不传（默认 8MB，留足网关余量）；0 = 不限制
+        self.max_upload_mb = float(s.get("max_upload_mb", 8))
         if not self.secret:
             raise RuntimeError(
                 "未配置上报密钥：请在 config.yaml 的 server.secret 或环境变量 "
@@ -75,9 +93,16 @@ class Uploader:
     def _parse(self, resp: requests.Response, path: str) -> dict[str, Any]:
         if resp.status_code >= 500 or resp.status_code == 429:
             raise UploadError(f"{path} HTTP {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code == 413:
+            # 文件超过服务端/网关上限：重试永远是同样结果，直接放弃这条，别反复刷日志
+            raise PermanentUploadError(f"{path} HTTP 413 文件过大，已放弃上报")
+        if resp.status_code in (400, 401, 403, 404, 415, 422):
+            # 签名/格式/路径问题：重试也没用
+            raise PermanentUploadError(
+                f"{path} HTTP {resp.status_code}（请检查配置）: {_brief(resp.text)}"
+            )
         if resp.status_code >= 400:
-            # 4xx 多为签名/格式问题，重试也没用，但仍抛出让上层记录
-            raise UploadError(f"{path} HTTP {resp.status_code}（请检查配置）: {resp.text[:300]}")
+            raise UploadError(f"{path} HTTP {resp.status_code}: {_brief(resp.text)}")
         try:
             return resp.json()
         except ValueError:
@@ -91,6 +116,14 @@ class Uploader:
         path_obj = Path(file_path)
         if not path_obj.is_file():
             raise FileNotFoundError(f"文件不存在：{path_obj}")
+        # 超过上限的直接不传（传了必被网关 413 打回），也不进重试队列
+        if self.max_upload_mb > 0:
+            size_mb = path_obj.stat().st_size / (1024 * 1024)
+            if size_mb > self.max_upload_mb:
+                raise PermanentUploadError(
+                    f"文件 {path_obj.name} 有 {size_mb:.1f}MB，"
+                    f"超过上限 {self.max_upload_mb:.0f}MB，不上报"
+                )
         content = path_obj.read_bytes()
         file_sha = hashlib.sha256(content).hexdigest()
         meta = {**meta, "filename": meta.get("filename") or path_obj.name}

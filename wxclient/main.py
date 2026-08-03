@@ -22,7 +22,7 @@ from typing import Any
 
 from .config import Config, load_config
 from .outbox import Outbox
-from .uploader import Uploader, UploadError
+from .uploader import PermanentUploadError, Uploader, UploadError
 from .wx_adapter import IMAGE_SUFFIXES, BaseSource, WxMessage, build_source
 
 log = logging.getLogger("client")
@@ -65,7 +65,22 @@ class Collector:
         suffix = Path(path).suffix.lower()
         if suffix in IMAGE_SUFFIXES:
             return False  # 图片不做解析，只当普通消息记录
-        return (not self.suffixes) or suffix in self.suffixes
+        if not ((not self.suffixes) or suffix in self.suffixes):
+            return False
+        # 过大的文件根本不入队：网关会 413 打回，入队只会反复重试刷日志
+        limit = float(self.cfg.server.get("max_upload_mb", 8))
+        if limit > 0:
+            try:
+                size_mb = Path(path).stat().st_size / (1024 * 1024)
+            except OSError:
+                return True  # 拿不到大小就照常尝试，由上报环节兜底
+            if size_mb > limit:
+                log.warning(
+                    "文件过大不上报：%s（%.1fMB > 上限 %.0fMB）",
+                    Path(path).name, size_mb, limit,
+                )
+                return False
+        return True
 
     def _sender_for_upload(self, m: WxMessage) -> str:
         """自消息用稳定的业务名称上报，避免服务端只看到“我”而无法识别角色。"""
@@ -148,6 +163,11 @@ class Sender:
         payloads = [r["payload"] for r in rows]
         try:
             res = self.up.send_messages(payloads)
+        except PermanentUploadError as exc:
+            for r in rows:
+                self.box.done(r["id"])
+            log.warning("放弃上报这 %d 条消息（重试无用）：%s", len(rows), exc)
+            return
         except UploadError as exc:
             for r in rows:
                 self.box.fail(r["id"], str(exc), self.max_attempts)
@@ -169,6 +189,11 @@ class Sender:
             res = self.up.send_file(row["file_path"], meta)
         except FileNotFoundError as exc:
             log.error("文件已不存在，放弃上报：%s", exc)
+            self.box.done(row["id"])
+            return
+        except PermanentUploadError as exc:
+            # 文件过大/签名格式错等：重试也一样，直接出队，避免反复上报刷日志
+            log.warning("放弃上报该文件（重试无用）：%s", exc)
             self.box.done(row["id"])
             return
         except UploadError as exc:

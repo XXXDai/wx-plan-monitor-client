@@ -5,6 +5,7 @@ server:
   secret: ""                              # 与服务端一致；留空则读环境变量 BARK_CLIENT_SECRET
   timeout: 30
   verify_ssl: true
+  max_upload_mb: 8                        # 超过这个大小的文件直接不上报（网关会 413 打回，重试无用）；0 = 不限制
 
 monitor:
   # 微信 4.1+（如 4.1.8.107）用 wxauto4；微信 3.9.x 用 wxauto；auto = 自动选
