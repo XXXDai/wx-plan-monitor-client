@@ -15,7 +15,9 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent.parent
 PUBLIC_SERVER_URL = "http://monitor.xdai.top"
 MANAGED_MONITOR = {
-    "chats": ["策略之BTC基金"],
+    # 「上班打卡群」只为打卡提醒服务：服务端在工作日 07:59 检查这个群里我今天发没发"打卡"。
+    # 群名必须和微信里显示的完全一致，否则 ChatWith 打不开、读不到消息。
+    "chats": ["策略之BTC基金", "上班打卡群"],
     "ignore_self": False,
     "self_sender": "XDai",
 }
