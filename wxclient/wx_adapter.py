@@ -54,14 +54,20 @@ class WxMessage:
     local_id: str = field(default="")
 
     def compute_local_id(self) -> str:
-        """去重键。有原生消息 id/hash 就用它，否则用 群+人+内容+时间(分钟) 哈希。"""
+        """去重键。有原生消息 id/hash 就用它，否则用 群+人+类型+内容(+微信时间) 哈希。
+
+        **绝不能掺入"当前时间"**：微信没给 wx_time 时，若用当下的分钟做种子，
+        同一条历史消息在每次重新扫描（重启、基线失败重扫）时都会算出不同的 id，
+        服务端按 local_id 去重就失效，于是同一句话被反复入库、甚至反复触发方案复核。
+        宁可让"同一人重复发同样内容"被合并成一条，也不能让历史消息重复入库。
+        """
         base = "|".join(
             [
                 self.chat,
                 self.sender,
                 self.msg_type,
                 self.content,
-                self.wx_time or time.strftime("%Y-%m-%d %H:%M"),
+                self.wx_time or "",
                 Path(self.file_path).name if self.file_path else "",
             ]
         )
@@ -134,7 +140,10 @@ class WxAuto4Source(BaseSource):
         # save_pic 保留仅为兼容；免费版无法下载图片，图片只记录为 [image]
         self.wx: Any = None
         self.chats: list[str] = []
-        self._seen: dict[str, set[str]] = {}   # chat -> 已见消息 key
+        # chat -> 已见消息 key（用 dict 保持插入顺序，裁剪时才能丢最旧的）
+        self._seen: dict[str, dict[str, None]] = {}
+        # 启动时基线失败的群：下轮仍按基线模式处理，避免把历史当新消息上报
+        self._pending_baseline: set[str] = set()
         self._file_warned = False
 
     # ---------- 导入（只用免费版 wxauto4） ---------- #
@@ -180,9 +189,12 @@ class WxAuto4Source(BaseSource):
         log.info(
             "监听方式：轮询（免费版 wxauto4）。文件请配置 monitor.wechat_file_dir 由目录监视捕获。"
         )
-        # 建立基线：把每个群当前已有消息标记为已见，避免上报历史
+        # 建立基线：把每个群当前已有消息标记为已见，避免上报历史。
+        # 基线失败的群记下来，下轮 poll 继续按"基线模式"重试，绝不把历史当新消息上报。
         for chat in self.chats:
-            self._poll_chat(chat, baseline=True)
+            if self._poll_chat(chat, baseline=True) is None:
+                self._pending_baseline.add(chat)
+                log.warning("群「%s」基线未建立（打开会话失败），下轮重试；期间不会上报其历史", chat)
 
     def describe_me(self) -> str:
         fn = getattr(self.wx, "GetMyInfo", None)
@@ -219,38 +231,44 @@ class WxAuto4Source(BaseSource):
             return []
 
     # ---------- 轮询 ---------- #
-    def _poll_chat(self, chat: str, baseline: bool = False) -> list[WxMessage]:
-        """打开某个群，取全部消息，返回未见过的新消息。baseline=True 时只记录不返回。"""
+    def _poll_chat(self, chat: str, baseline: bool = False) -> list[WxMessage] | None:
+        """打开某个群，取全部消息，返回未见过的新消息。baseline=True 时只记录不返回。
+
+        返回 None 表示这次没能读到会话（打开失败/取消息异常），调用方据此判断
+        基线是否建立成功——**不能**把失败当成"空列表"，否则历史会在下轮被全量上报。
+        """
         try:
             res = self.wx.ChatWith(chat)
             if _is_failure(res):
                 log.warning("ChatWith(%s) 失败：%s", chat, _failure_text(res))
-                return []
+                return None
         except Exception as exc:  # noqa: BLE001
             log.warning("ChatWith(%s) 异常：%s", chat, exc)
-            return []
+            return None
 
         try:
             msgs = self.wx.GetAllMessage() or []
         except Exception as exc:  # noqa: BLE001
             log.warning("GetAllMessage(%s) 异常：%s", chat, exc)
-            return []
+            return None
 
-        seen = self._seen.setdefault(chat, set())
+        seen = self._seen.setdefault(chat, {})
         out: list[WxMessage] = []
         for msg in msgs:
             key = _msg_key(msg)
             if key in seen:
                 continue
-            seen.add(key)
+            seen[key] = None
             if baseline:
                 continue
             m = self._normalize(chat, msg)
             if m:
                 out.append(m)
 
-        if len(seen) > 4000:  # 控制长会话的内存
-            self._seen[chat] = set(list(seen)[-2000:])
+        if len(seen) > 4000:  # 控制长会话的内存：按插入顺序丢最旧的一半
+            # 注意：不能用 set 切片（set 无序，会随机丢掉"还在窗口里"的键，
+            # 那些消息下轮就被当成新消息重复上报）。dict 保证插入顺序。
+            self._seen[chat] = dict.fromkeys(list(seen.keys())[-2000:])
         if baseline:
             log.info("群「%s」建立基线：已有 %d 条历史消息不再上报", chat, len(seen))
         return out
@@ -313,7 +331,15 @@ class WxAuto4Source(BaseSource):
     def poll(self) -> list[WxMessage]:
         out: list[WxMessage] = []
         for chat in self.chats:
-            out.extend(self._poll_chat(chat, baseline=False))
+            if chat in self._pending_baseline:
+                # 上次基线没建成：这轮只补基线，不上报，避免整段历史被当成新消息
+                if self._poll_chat(chat, baseline=True) is not None:
+                    self._pending_baseline.discard(chat)
+                    log.info("群「%s」基线已补建完成，开始正常上报新消息", chat)
+                continue
+            got = self._poll_chat(chat, baseline=False)
+            if got:
+                out.extend(got)
         return out
 
     def health(self) -> dict[str, Any]:
