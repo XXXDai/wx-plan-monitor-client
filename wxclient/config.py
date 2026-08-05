@@ -69,6 +69,10 @@ DEFAULTS: dict[str, Any] = {
         "ignore_self": False,  # 默认也上报自己发的消息，供服务端理解完整上下文
         "self_sender": "XDai",  # 自己发言上传到服务端时使用的名称；留空则沿用微信返回的名称
         "save_pic": False,  # 是否让 wxauto 下载图片（图片不解析，默认关）
+        # 每轮读取前先切到"文件传输助手"再切回被监听的群，逼微信重新渲染消息列表。
+        # 免费版 wxauto4 只能读已渲染的消息：微信一直停在同一会话时，新消息可能读不到
+        #（实测有过"昨晚的回复直到第二天切了会话才被抓到"）。除非确认不需要，别关。
+        "force_refresh": True,
     },
     "checkin": dict(MANAGED_CHECKIN),
     "runtime": {

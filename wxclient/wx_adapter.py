@@ -53,13 +53,16 @@ class WxMessage:
     raw_type: str = ""  # 后端原始 type / attr
     local_id: str = field(default="")
 
-    def compute_local_id(self) -> str:
-        """去重键。有原生消息 id/hash 就用它，否则用 群+人+类型+内容(+微信时间) 哈希。
+    def compute_local_id(self, occurrence: int = 0, day: str = "") -> str:
+        """服务端去重用的稳定 id：群+人+类型+内容+日期+当天同内容出现次序。
 
-        **绝不能掺入"当前时间"**：微信没给 wx_time 时，若用当下的分钟做种子，
-        同一条历史消息在每次重新扫描（重启、基线失败重扫）时都会算出不同的 id，
-        服务端按 local_id 去重就失效，于是同一句话被反复入库、甚至反复触发方案复核。
-        宁可让"同一人重复发同样内容"被合并成一条，也不能让历史消息重复入库。
+        两条硬规则：
+        · **不掺当前时刻**——否则同一条历史消息每次重扫都算出新 id，服务端按
+          local_id 去重就失效，同一句话反复入库、甚至反复触发方案复核；
+        · **不用 wxauto4 的 id/hash**——实测聊天窗口重新渲染后这两个值会变，
+          等于每次重渲染都把整窗消息当成新消息。
+        用"日期 + 窗口内同内容次序"既能在重渲染后复现同一个 id，
+        又能区分同一个人当天重复发的同样内容（比如分别回两条指令的两个"好的"）。
         """
         base = "|".join(
             [
@@ -67,8 +70,9 @@ class WxMessage:
                 self.sender,
                 self.msg_type,
                 self.content,
-                self.wx_time or "",
+                self.wx_time or day or "",
                 Path(self.file_path).name if self.file_path else "",
+                str(occurrence),
             ]
         )
         return hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
@@ -116,19 +120,41 @@ def _failure_text(res: Any) -> str:
     return str(res)
 
 
-def _msg_key(msg: Any) -> str:
-    """消息去重键：优先 id/hash，退化到 attr+type+sender+content 哈希。"""
-    for a in ("id", "hash"):
-        v = getattr(msg, a, None)
-        if v:
-            return f"{a}:{v}"
+def _msg_key(msg: Any, occurrence: int = 0, day: str = "") -> str:
+    """消息去重键。
+
+    **刻意不用 wxauto4 的 id/hash**：实测这两个值在聊天窗口重新渲染后会变
+    （切到别的会话再切回来，同一条消息就换了 id）。用它做键会导致：
+      · 整窗消息被当成新消息重复上报（同一句话重复入库、重复触发方案复核）；
+      · 而窗口没重新渲染时又读不到新消息。
+    所以改用"内容 + 当天 + 窗口内同内容出现次序"这种可复现的身份：
+    重新渲染算出来还是同一个键；同一个人当天重复发一样的话（比如两次"好的"）
+    次序不同，仍能区分开。
+    """
     attr = getattr(msg, "attr", "")
     mtype = getattr(msg, "type", "")
     sender = getattr(msg, "sender", "")
     content = getattr(msg, "content", "")
-    return "h:" + hashlib.sha256(
-        f"{attr}|{mtype}|{sender}|{content}".encode("utf-8", "ignore")
+    return "s:" + hashlib.sha256(
+        f"{day}|{attr}|{mtype}|{sender}|{content}|{occurrence}".encode("utf-8", "ignore")
     ).hexdigest()[:24]
+
+
+def _occurrences(msgs: list[Any]) -> list[int]:
+    """给一次窗口读取里的每条消息编号：同一(发送人,类型,内容)第几次出现（0 起）。"""
+    seen: dict[tuple, int] = {}
+    out: list[int] = []
+    for msg in msgs:
+        ident = (
+            getattr(msg, "attr", ""),
+            getattr(msg, "type", ""),
+            getattr(msg, "sender", ""),
+            getattr(msg, "content", ""),
+        )
+        n = seen.get(ident, 0)
+        seen[ident] = n + 1
+        out.append(n)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -144,8 +170,10 @@ class WxAuto4Source(BaseSource):
 
     name = "wxauto4"
 
-    def __init__(self, save_pic: bool = False):
+    def __init__(self, save_pic: bool = False, force_refresh: bool = True):
         # save_pic 保留仅为兼容；免费版无法下载图片，图片只记录为 [image]
+        # force_refresh：每轮读取前切一次会话，逼微信重新渲染，否则可能读不到新消息
+        self.force_refresh = force_refresh
         self.wx: Any = None
         self.chats: list[str] = []
         # chat -> 已见消息 key（用 dict 保持插入顺序，裁剪时才能丢最旧的）
@@ -153,6 +181,8 @@ class WxAuto4Source(BaseSource):
         # 启动时基线失败的群：下轮仍按基线模式处理，避免把历史当新消息上报
         self._pending_baseline: set[str] = set()
         self._file_warned = False
+        self._flip_target: str | None = None      # 用于强制刷新的"中转会话"
+        self._flip_probed = False
 
     # ---------- 导入（只用免费版 wxauto4） ---------- #
     @staticmethod
@@ -239,12 +269,53 @@ class WxAuto4Source(BaseSource):
             return []
 
     # ---------- 轮询 ---------- #
+    def _pick_flip_target(self) -> str | None:
+        """挑一个"中转会话"用于强制刷新：优先文件传输助手（自己的会话，没有社交副作用）。"""
+        if self._flip_probed:
+            return self._flip_target
+        self._flip_probed = True
+        names = self.session_names()
+        for preferred in ("文件传输助手", "File Transfer", "微信团队"):
+            if preferred in names:
+                self._flip_target = preferred
+                break
+        else:
+            for n in names:
+                if n not in self.chats:
+                    self._flip_target = n
+                    break
+        if self._flip_target:
+            log.info("强制刷新用的中转会话：「%s」", self._flip_target)
+        else:
+            log.warning(
+                "找不到可用的中转会话，无法强制刷新消息列表；"
+                "若微信一直停在被监听的群上，可能读不到新消息"
+            )
+        return self._flip_target
+
+    def _force_refresh(self, chat: str) -> None:
+        """先切到中转会话再切回来，逼微信重新渲染消息列表。
+
+        免费版 wxauto4 只能读"当前已渲染"的消息：如果微信一直停在同一个会话上
+        （窗口没最小化也没切换），新到的消息可能一直读不出来——实测有过"昨晚的回复
+        直到第二天切了一次会话才被抓到"。所以每轮读取前主动切一次。
+        """
+        target = self._pick_flip_target()
+        if not target or target == chat:
+            return
+        try:
+            self.wx.ChatWith(target)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("切到中转会话「%s」失败（忽略）：%s", target, exc)
+
     def _poll_chat(self, chat: str, baseline: bool = False) -> list[WxMessage] | None:
         """打开某个群，取全部消息，返回未见过的新消息。baseline=True 时只记录不返回。
 
         返回 None 表示这次没能读到会话（打开失败/取消息异常），调用方据此判断
         基线是否建立成功——**不能**把失败当成"空列表"，否则历史会在下轮被全量上报。
         """
+        if not baseline and self.force_refresh:
+            self._force_refresh(chat)
         try:
             res = self.wx.ChatWith(chat)
             if _is_failure(res):
@@ -262,14 +333,16 @@ class WxAuto4Source(BaseSource):
 
         seen = self._seen.setdefault(chat, {})
         out: list[WxMessage] = []
-        for msg in msgs:
-            key = _msg_key(msg)
+        day = time.strftime("%Y-%m-%d")
+        occs = _occurrences(msgs)
+        for msg, occ in zip(msgs, occs):
+            key = _msg_key(msg, occ, day)
             if key in seen:
                 continue
             seen[key] = None
             if baseline:
                 continue
-            m = self._normalize(chat, msg)
+            m = self._normalize(chat, msg, occurrence=occ, day=day)
             if m:
                 out.append(m)
 
@@ -282,7 +355,7 @@ class WxAuto4Source(BaseSource):
         return out
 
     # ---------- 归一化 ---------- #
-    def _normalize(self, chat: str, msg: Any) -> WxMessage | None:
+    def _normalize(self, chat: str, msg: Any, occurrence: int = 0, day: str = "") -> WxMessage | None:
         attr = str(getattr(msg, "attr", "") or "").lower()
         mtype = str(getattr(msg, "type", "") or "").lower()
         if attr == "system" or mtype in V4_SKIP_TYPES:
@@ -326,12 +399,8 @@ class WxAuto4Source(BaseSource):
             file_path=None,
             raw_type=attr or mtype,
         )
-        native = getattr(msg, "id", None) or getattr(msg, "hash", None)
-        m.local_id = (
-            hashlib.sha256(f"{chat}|{native}".encode()).hexdigest()[:40]
-            if native
-            else m.compute_local_id()
-        )
+        # 不用 wxauto4 的 id/hash：窗口重渲染后会变（详见 _msg_key 的说明）
+        m.local_id = m.compute_local_id(occurrence=occurrence, day=day)
         if not m.content:
             return None
         return m
@@ -368,8 +437,9 @@ class WxAuto4Source(BaseSource):
             log.warning("snapshot GetAllMessage(%s) 异常：%s", chat, exc)
             return None
         out: list[WxMessage] = []
-        for msg in msgs:
-            m = self._normalize(chat, msg)
+        day = time.strftime("%Y-%m-%d")
+        for msg, occ in zip(msgs, _occurrences(msgs)):
+            m = self._normalize(chat, msg, occurrence=occ, day=day)
             if m:
                 out.append(m)
         return out
@@ -751,7 +821,10 @@ def build_source(cfg) -> BaseSource:
                 log.warning("未找到 wxauto4，回退到老版 wxauto（仅微信 3.9.x）")
                 return WxAutoLegacySource(save_pic=save_pic)
 
-        wx = WxAuto4Source(save_pic=save_pic)
+        wx = WxAuto4Source(
+            save_pic=save_pic,
+            force_refresh=bool(cfg.monitor.get("force_refresh", True)),
+        )
         if file_dir:
             watcher = FolderWatchSource(
                 cfg.abs_path(file_dir),
