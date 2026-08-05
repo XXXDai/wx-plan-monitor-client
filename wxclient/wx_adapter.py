@@ -52,6 +52,8 @@ class WxMessage:
     file_path: str | None = None
     raw_type: str = ""  # 后端原始 type / attr
     local_id: str = field(default="")
+    # 来源侧的会话内去重键；上层处理失败时用它回滚，让这条消息下轮能重新读到
+    dedup_key: str = field(default="")
 
     def compute_local_id(self, occurrence: int = 0, day: str = "") -> str:
         """服务端去重用的稳定 id：群+人+类型+内容+日期+当天同内容出现次序。
@@ -92,6 +94,14 @@ class BaseSource:
 
         专给"打卡检测"用：只读一次、读完就地判断，内容不入队、不上报。
         返回 None 表示没读到（会话打不开）。
+        """
+        return None
+
+    def forget(self, chat: str, dedup_key: str) -> None:
+        """撤销"已见"标记，让这条消息下一轮重新读到。
+
+        上层处理某条消息失败时必须调用：来源侧是"读到就标记已见"，
+        若上层没入队成功又不回滚，这条消息就永久丢了。
         """
         return None
 
@@ -344,6 +354,7 @@ class WxAuto4Source(BaseSource):
                 continue
             m = self._normalize(chat, msg, occurrence=occ, day=day)
             if m:
+                m.dedup_key = key
                 out.append(m)
 
         if len(seen) > 4000:  # 控制长会话的内存：按插入顺序丢最旧的一半
@@ -419,6 +430,10 @@ class WxAuto4Source(BaseSource):
                 out.extend(got)
         return out
 
+    def forget(self, chat: str, dedup_key: str) -> None:
+        if dedup_key:
+            self._seen.get(chat, {}).pop(dedup_key, None)
+
     def snapshot(self, chat: str) -> list[WxMessage] | None:
         """只读一次该会话的当前消息，不写入 _seen（不影响正常轮询）。"""
         if not chat:
@@ -441,6 +456,7 @@ class WxAuto4Source(BaseSource):
         for msg, occ in zip(msgs, _occurrences(msgs)):
             m = self._normalize(chat, msg, occurrence=occ, day=day)
             if m:
+                m.dedup_key = key
                 out.append(m)
         return out
 
@@ -574,6 +590,13 @@ class CompositeSource(BaseSource):
             except Exception:
                 log.exception("子源 %s poll 出错", s.name)
         return out
+
+    def forget(self, chat: str, dedup_key: str) -> None:
+        for s in self.sources:
+            try:
+                s.forget(chat, dedup_key)
+            except Exception:  # noqa: BLE001
+                pass
 
     def snapshot(self, chat: str) -> list[WxMessage] | None:
         for s in self.sources:

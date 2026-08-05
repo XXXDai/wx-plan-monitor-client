@@ -135,8 +135,21 @@ class Collector:
         errors = 0
         while not _stop.is_set():
             try:
+                # 逐条隔离：一条处理失败不能拖垮整批。
+                # 来源侧是"读到就标记已见"，所以失败必须回滚该条的已见标记，
+                # 否则这条消息永久丢失（曾因此丢过一条"好的"，导致命令确认没记上）。
                 for m in self.source.poll():
-                    self.handle(m)
+                    try:
+                        self.handle(m)
+                    except Exception:
+                        log.exception(
+                            "处理消息失败，已退回下轮重试：%s / %s：%s",
+                            m.chat, m.sender, (m.content or "")[:40].replace("\n", " "),
+                        )
+                        try:
+                            self.source.forget(m.chat, m.dedup_key)
+                        except Exception:  # noqa: BLE001
+                            log.debug("回滚已见标记失败（该条将丢失）")
                 # 到点做一次打卡检测（一天一次，读完就判、内容不入队）
                 if self.checkin is not None:
                     self.checkin.maybe_run()
