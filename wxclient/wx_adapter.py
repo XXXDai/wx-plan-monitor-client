@@ -130,6 +130,24 @@ def _failure_text(res: Any) -> str:
     return str(res)
 
 
+def _extract_wx_time(msg: Any) -> str | None:
+    """取消息自身的发送时间（微信显示的时间）。
+
+    这是去重最可靠的关键字段：同一条消息无论被重扫多少次，它的发送时间都不变。
+    wxauto4 的消息对象有 time / time_str（见其 msgs/msg 模块），但不同消息类型
+    未必都有值，所以多个字段依次尝试；**跳过可调用对象**——否则 getattr 取到方法时
+    `if v:` 为真，会把 "<bound method ...>" 当成时间写进去。
+    """
+    for attr in ("time_str", "time", "msg_time", "datetime", "create_time", "timestamp"):
+        v = getattr(msg, attr, None)
+        if v is None or callable(v):
+            continue
+        text = str(v).strip()
+        if text and text.lower() not in ("none", "null", ""):
+            return text
+    return None
+
+
 def _msg_key(msg: Any, occurrence: int = 0, day: str = "") -> str:
     """消息去重键。
 
@@ -262,6 +280,20 @@ class WxAuto4Source(BaseSource):
         log.info(
             "监听方式：轮询（免费版 wxauto4）。文件请配置 monitor.wechat_file_dir 由目录监视捕获。"
         )
+        # 报一次"能不能拿到消息时间"：拿不到的话去重只能退化成内容匹配，值得知道
+        try:
+            probe = self.wx.GetAllMessage() or []
+            sample = next((m for m in reversed(probe) if _extract_wx_time(m)), None)
+            if sample is not None:
+                log.info("消息时间可用（去重将使用它）：示例 %s", _extract_wx_time(sample))
+            elif probe:
+                log.warning(
+                    "拿不到消息发送时间（wxauto4 未提供），去重只能按内容匹配，"
+                    "同一人重复发相同内容可能被合并"
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
         # 建立基线：把每个群当前已有消息标记为已见，避免上报历史。
         # 基线失败的群记下来，下轮 poll 继续按"基线模式"重试，绝不把历史当新消息上报。
         for chat in self.chats:
@@ -409,12 +441,7 @@ class WxAuto4Source(BaseSource):
         content = getattr(msg, "content", "")
         content = content if isinstance(content, str) else str(content)
 
-        wx_time = None
-        for a in ("time", "msg_time", "datetime"):
-            v = getattr(msg, a, None)
-            if v:
-                wx_time = str(v)
-                break
+        wx_time = _extract_wx_time(msg)
 
         # 免费版不能下载文件；文件消息只记录，实际文件走 FolderWatchSource
         if mtype == "file" and not self._file_warned:
@@ -726,12 +753,7 @@ class WxAutoLegacySource(BaseSource):
                 break
         content = getattr(msg, "content", "")
         content = content if isinstance(content, str) else str(content)
-        wx_time = None
-        for attr in ("time", "msg_time", "datetime"):
-            v = getattr(msg, attr, None)
-            if v:
-                wx_time = str(v)
-                break
+        wx_time = _extract_wx_time(msg)
         file_path = self._extract_file(msg, content)
         if file_path:
             msg_type = "image" if Path(file_path).suffix.lower() in IMAGE_SUFFIXES else "file"

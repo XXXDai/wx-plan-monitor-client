@@ -40,6 +40,19 @@ class CheckinTask:
         self.sender = str(c.get("sender") or "").strip()
         self.at_h, self.at_m = _hhmm(c.get("at_time", "07:59"))
         self.weekdays_only = bool(c.get("weekdays_only", True))
+        # 只在检测时间点之后的这个窗口内才检测；过了窗口就算今天错过了。
+        # 没有窗口的话，任何时间启动/运行都会立刻去读打卡群（只要今天还没读过）。
+        self.window_minutes = max(1, int(c.get("window_minutes", 30)))
+        # 启动瞬间不读打卡群：切会话会打断正在监听的群，而且这时读到的
+        # 也只是"当前时刻有没有打卡"，跟 07:59 那个约定的检查点没关系。
+        now = datetime.now()
+        if self._past_check_time(now):
+            self._done_on = now.date()
+            if self.enabled and self.chat:
+                log.info(
+                    "启动时已过 %02d:%02d，今天不再检测打卡（明天到点自动检测）",
+                    self.at_h, self.at_m,
+                )
         if self.enabled and self.chat:
             log.info(
                 "打卡检测已启用：工作日 %02d:%02d 读一次「%s」，只看%s发的含%s的消息（内容不上报）",
@@ -49,6 +62,12 @@ class CheckinTask:
             )
 
     # ---------------- 调度 ---------------- #
+    def _past_check_time(self, now: datetime) -> bool:
+        return (now.hour, now.minute) >= (self.at_h, self.at_m)
+
+    def _minutes_since_check_time(self, now: datetime) -> int:
+        return (now.hour * 60 + now.minute) - (self.at_h * 60 + self.at_m)
+
     def _due(self, now: datetime) -> bool:
         if not (self.enabled and self.chat):
             return False
@@ -56,7 +75,10 @@ class CheckinTask:
             return False
         if self._done_on == now.date():
             return False
-        return (now.hour, now.minute) >= (self.at_h, self.at_m)
+        # 必须落在 [检测时间, 检测时间+窗口) 内：过了窗口就不再补做，
+        # 免得中午重启时莫名去读一次打卡群。
+        delta = self._minutes_since_check_time(now)
+        return 0 <= delta < self.window_minutes
 
     def maybe_run(self, now: datetime | None = None) -> bool:
         """到点就跑一次；返回是否执行了检测。"""

@@ -30,6 +30,7 @@ MANAGED_CHECKIN = {
     "keywords": ["打卡"],
     "sender": "XDai",         # 只认我自己发的；留空=群里任何人发都算
     "at_time": "07:59",       # 每个工作日这个时间点检测一次
+    "window_minutes": 30,     # 只在 07:59 之后这么多分钟内检测；过了就算今天错过
     "weekdays_only": True,
 }
 
