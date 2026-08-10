@@ -179,7 +179,10 @@ class Sender:
     def _flush_messages(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
-        payloads = [r["payload"] for r in rows]
+        # 带上客户端观察次序：outbox 行号按"看到消息的先后"递增，是唯一可靠的顺序信号。
+        # 服务端不能用它自己的入库 id 判先后——某条上报失败会退避重试，
+        # 先发的消息反而后到、拿到更大的 id。
+        payloads = [{**r["payload"], "seq": r["id"]} for r in rows]
         try:
             res = self.up.send_messages(payloads)
         except PermanentUploadError as exc:
