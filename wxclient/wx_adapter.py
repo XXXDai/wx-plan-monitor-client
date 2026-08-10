@@ -14,7 +14,6 @@
    专属，**本项目不使用、也不安装 Plus 版**。因此：
 
      - 文本：轮询 —— 每隔 poll_interval 秒挨个 ChatWith(群) + GetAllMessage()，比对出新消息。
-             副作用是会来回切换微信当前聊天窗口，属正常现象。
      - 文件：免费版无法下载群文件，改由 FolderWatchSource 盯微信文件下载目录来捕获
              （见 monitor.wechat_file_dir）。
 
@@ -198,10 +197,8 @@ class WxAuto4Source(BaseSource):
 
     name = "wxauto4"
 
-    def __init__(self, save_pic: bool = False, force_refresh: bool = True):
+    def __init__(self, save_pic: bool = False):
         # save_pic 保留仅为兼容；免费版无法下载图片，图片只记录为 [image]
-        # force_refresh：每轮读取前切一次会话，逼微信重新渲染，否则可能读不到新消息
-        self.force_refresh = force_refresh
         self.wx: Any = None
         self.chats: list[str] = []
         # chat -> 已见消息 key（用 dict 保持插入顺序，裁剪时才能丢最旧的）
@@ -209,8 +206,6 @@ class WxAuto4Source(BaseSource):
         # 启动时基线失败的群：下轮仍按基线模式处理，避免把历史当新消息上报
         self._pending_baseline: set[str] = set()
         self._file_warned = False
-        self._flip_target: str | None = None      # 用于强制刷新的"中转会话"
-        self._flip_probed = False
 
     # ---------- 导入（只用免费版 wxauto4） ---------- #
     @staticmethod
@@ -336,53 +331,12 @@ class WxAuto4Source(BaseSource):
             return []
 
     # ---------- 轮询 ---------- #
-    def _pick_flip_target(self) -> str | None:
-        """挑一个"中转会话"用于强制刷新：优先文件传输助手（自己的会话，没有社交副作用）。"""
-        if self._flip_probed:
-            return self._flip_target
-        self._flip_probed = True
-        names = self.session_names()
-        for preferred in ("文件传输助手", "File Transfer", "微信团队"):
-            if preferred in names:
-                self._flip_target = preferred
-                break
-        else:
-            for n in names:
-                if n not in self.chats:
-                    self._flip_target = n
-                    break
-        if self._flip_target:
-            log.info("强制刷新用的中转会话：「%s」", self._flip_target)
-        else:
-            log.warning(
-                "找不到可用的中转会话，无法强制刷新消息列表；"
-                "若微信一直停在被监听的群上，可能读不到新消息"
-            )
-        return self._flip_target
-
-    def _force_refresh(self, chat: str) -> None:
-        """先切到中转会话再切回来，逼微信重新渲染消息列表。
-
-        免费版 wxauto4 只能读"当前已渲染"的消息：如果微信一直停在同一个会话上
-        （窗口没最小化也没切换），新到的消息可能一直读不出来——实测有过"昨晚的回复
-        直到第二天切了一次会话才被抓到"。所以每轮读取前主动切一次。
-        """
-        target = self._pick_flip_target()
-        if not target or target == chat:
-            return
-        try:
-            self.wx.ChatWith(target)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("切到中转会话「%s」失败（忽略）：%s", target, exc)
-
     def _poll_chat(self, chat: str, baseline: bool = False) -> list[WxMessage] | None:
         """打开某个群，取全部消息，返回未见过的新消息。baseline=True 时只记录不返回。
 
         返回 None 表示这次没能读到会话（打开失败/取消息异常），调用方据此判断
         基线是否建立成功——**不能**把失败当成"空列表"，否则历史会在下轮被全量上报。
         """
-        if not baseline and self.force_refresh:
-            self._force_refresh(chat)
         try:
             res = self.wx.ChatWith(chat)
             if _is_failure(res):
@@ -891,10 +845,7 @@ def build_source(cfg) -> BaseSource:
                 log.warning("未找到 wxauto4，回退到老版 wxauto（仅微信 3.9.x）")
                 return WxAutoLegacySource(save_pic=save_pic)
 
-        wx = WxAuto4Source(
-            save_pic=save_pic,
-            force_refresh=bool(cfg.monitor.get("force_refresh", True)),
-        )
+        wx = WxAuto4Source(save_pic=save_pic)
         if file_dir:
             watcher = FolderWatchSource(
                 cfg.abs_path(file_dir),
