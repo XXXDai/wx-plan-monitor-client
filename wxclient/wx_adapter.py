@@ -200,6 +200,31 @@ class WxAuto4Source(BaseSource):
         try:
             from wxauto4 import WeChat  # type: ignore
         except ImportError as exc:
+            msg = str(exc)
+            # 区分"没装"和"装了但被 Windows 拦住"——后者按"没装"去 pip install 会白折腾
+            blocked = (
+                "DLL load failed" in msg
+                or "应用程序控制策略" in msg
+                or "application control policy" in msg.lower()
+            )
+            if blocked:
+                raise RuntimeError(
+                    "wxauto4 已安装，但它的原生模块被 Windows 拦住了，无法加载。\n"
+                    f"原始错误：{exc}\n"
+                    "这是系统的应用程序控制策略（Smart App Control / WDAC / AppLocker）"
+                    "在阻止从用户可写目录（Documents、Downloads 等）加载 .pyd/.dll。\n"
+                    "常见解法（从省事到彻底）：\n"
+                    "  1) 先解除文件的\"来自网络\"标记：\n"
+                    "     Get-ChildItem -Recurse .venv -Include *.pyd,*.dll | Unblock-File\n"
+                    "  2) 把整个项目（含 .venv）移到 C:\\wxclient 这类根目录下重建虚拟环境，\n"
+                    "     很多策略只拦 Documents/Downloads 等用户可写路径；\n"
+                    "  3) 关掉 Smart App Control：设置 → 隐私和安全性 → Windows 安全中心 →\n"
+                    "     应用和浏览器控制 → 智能应用控制 → 关闭（注意：关闭后无法再开启）；\n"
+                    "  4) 若是公司管控的机器（WDAC/AppLocker），需要 IT 给该路径加白名单。\n"
+                    "查具体是哪条策略拦的：\n"
+                    "  Get-WinEvent -LogName Microsoft-Windows-CodeIntegrity/Operational -MaxEvents 20 |\n"
+                    "    Where-Object Message -like \"*wxauto4*\" | Format-List TimeCreated, Id, Message"
+                ) from exc
             raise RuntimeError(
                 "未安装 wxauto4：请执行 `pip install wxauto4`（微信 4.1.8.107 免费版）。"
                 "本项目只用免费版，旧的 wxauto 只支持微信 3.9.x。"
