@@ -176,7 +176,8 @@ def _time_anchors(msgs: list[Any]) -> list[str]:
     锚点只跟消息自身有关，所以跨零点也稳定：
       · 消息自带发送时间就用它；
       · 否则沿用它上方最近那条时间分隔条的文字（微信就是靠这个显示时间的）；
-      · 都没有就留空——宁可退化成"内容 + 次序"，也不掺当前日期。
+      · 窗口最上面那几条在第一条分隔条之前，就借用下方第一个锚点——同样是稳定值；
+      · 整窗一点时间信息都没有才返回空串，由调用方退回"今天几号"（见 _poll_chat）。
     """
     out: list[str] = []
     current = ""
@@ -187,6 +188,15 @@ def _time_anchors(msgs: list[Any]) -> list[str]:
         elif _is_time_divider(msg):
             current = str(getattr(msg, "content", "") or "").strip() or current
         out.append(current)
+    # 回填开头那段：它们在第一条分隔条之前，借用第一个锚点即可。
+    # 别留空——留空会让"另一天发的同样内容"算出同一个 local_id，而服务端那列是
+    # UNIQUE，插入直接报错、整批上报失败，客户端会无限重试。
+    first = next((a for a in out if a), "")
+    if first:
+        for i, a in enumerate(out):
+            if a:
+                break
+            out[i] = first
     return out
 
 
@@ -402,7 +412,9 @@ class WxAuto4Source(BaseSource):
 
         seen = self._seen.setdefault(chat, {})
         out: list[WxMessage] = []
-        anchors = _time_anchors(msgs)
+        # 整窗都没有时间信息时才退回"今天几号"：那种情况下宁可零点重报一次，
+        # 也不能让不同天的同样内容算出同一个 local_id（服务端 UNIQUE，会插入失败）。
+        anchors = [a or time.strftime("%Y-%m-%d") for a in _time_anchors(msgs)]
         occs = _occurrences(msgs, anchors)
         for msg, occ, stamp in zip(msgs, occs, anchors):
             key = _msg_key(msg, occ, stamp)
@@ -508,7 +520,7 @@ class WxAuto4Source(BaseSource):
             log.warning("snapshot GetAllMessage(%s) 异常：%s", chat, exc)
             return None
         out: list[WxMessage] = []
-        anchors = _time_anchors(msgs)
+        anchors = [a or time.strftime("%Y-%m-%d") for a in _time_anchors(msgs)]
         for msg, occ, stamp in zip(msgs, _occurrences(msgs, anchors), anchors):
             m = self._normalize(chat, msg, occurrence=occ, stamp=stamp)
             if m:

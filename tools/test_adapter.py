@@ -223,7 +223,10 @@ check("图片被忽略、txt 被捕获", names == ["note.txt"], str(names))
 print("\n=== 去重键：跨零点必须稳定（不能掺当前日期）===")
 _orig = WxAuto4Source.import_wechat
 fake2 = FreeWx()
-fake2._msgs["套保方案群"] = [Msg(sender="老王", content="历史", id="a1")]
+fake2._msgs["套保方案群"] = [
+    Msg(sender="老王", content="历史", id="a1"),
+    Msg(type="time", content="2026-08-10 23:45", sender=""),  # 微信窗口里的时间分隔条
+]
 WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake2, "wxauto4"))
 try:
     nsrc = WxAuto4Source()
@@ -267,6 +270,15 @@ keys = [
     for m, o, s in zip(anchored, wa._occurrences(anchored, anchors), anchors)
 ]
 check("不同时间段发的同样内容仍是两条", keys[1] != keys[3], str(keys))
+check(
+    "第一条分隔条之前的消息借用下方锚点（不留空）",
+    wa._time_anchors([Msg(sender="A", content="早", id="d0")] + anchored)[0] == "2026-08-10 23:50",
+    str(wa._time_anchors([Msg(sender="A", content="早", id="d0")] + anchored)[:2]),
+)
+check(
+    "整窗都没有时间信息时才退回空串（由调用方补当天日期）",
+    wa._time_anchors([Msg(sender="A", content="早", id="d1")]) == [""],
+)
 same = [Msg(sender="A", content="好的", id="c1"), Msg(sender="A", content="好的", id="c2")]
 sa = wa._time_anchors(same)
 check(
