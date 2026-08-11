@@ -235,7 +235,8 @@ try:
     first = nsrc.poll()
     check("23:50 的消息正常上报一次", [x.content for x in first] == ["值得去一下"], str(first))
     _real_strftime = wa.time.strftime
-    wa.time.strftime = lambda fmt, *a: "2026-08-11" if fmt == "%Y-%m-%d" else _real_strftime(fmt, *a)
+    # 必须换成一个和"今天"不同的日期，否则这个用例是空转的
+    wa.time.strftime = lambda fmt, *a: "2099-01-01" if fmt == "%Y-%m-%d" else _real_strftime(fmt, *a)
     try:
         check("跨到第二天后同一条消息不再重报", nsrc.poll() == [], str(nsrc.poll()))
     finally:
@@ -250,6 +251,32 @@ try:
     )
     check("snapshot 不影响正常轮询的去重状态", nsrc.poll() == [], "snapshot 后不该冒出新消息")
     check("snapshot 打不开会话时返回 None", nsrc.snapshot("不存在的群") is None or True)
+finally:
+    WxAuto4Source.import_wechat = staticmethod(_orig)
+
+# 08-10 23:12 那句"好的"被吞掉、直到零点才补报，就是这个场景
+fake3 = FreeWx()
+fake3._msgs["套保方案群"] = [
+    Msg(type="time", content="2026-08-10 09:00", sender=""),
+    Msg(sender="Tianyus_", content="好的", id="e1"),
+]
+WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake3, "wxauto4"))
+try:
+    ssrc = WxAuto4Source()
+    ssrc.start(["套保方案群"])           # 基线：把早上那句"好的"记为已见
+    # 聊天窗口往下滚：早上那段滚出去了，新来一条文件消息和又一句"好的"
+    fake3._msgs["套保方案群"] = [
+        Msg(type="time", content="2026-08-10 23:11", sender=""),
+        Msg(sender="宕桑", content="文件 套保方案清单0810.docx", id="e2"),
+        Msg(sender="Tianyus_", content="好的", id="e3"),
+    ]
+    got = [x.content for x in ssrc.poll()]
+    check(
+        "旧的同样内容滚出窗口后，新发的短回应仍会上报（不再被吞）",
+        "好的" in got,
+        str(got),
+    )
+    check("补报之后不会再重复一次", ssrc.poll() == [], str(ssrc.poll()))
 finally:
     WxAuto4Source.import_wechat = staticmethod(_orig)
 
