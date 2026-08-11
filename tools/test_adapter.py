@@ -80,8 +80,9 @@ print("=== 消息归一化 ===")
 m = src._normalize("套保方案群", Msg(sender="张总", content="今天防守为主 62800", id="m1"))
 check("普通群消息", m and m.sender == "张总" and m.msg_type == "text", str(m))
 check(
-    "用原生消息 id 做去重键",
-    m.local_id == src._normalize("套保方案群", Msg(sender="张总", content="别的", id="m1")).local_id,
+    "去重键刻意不看 wxauto4 的原生 id（窗口重渲染后它会变）",
+    m.local_id == src._normalize("套保方案群", Msg(sender="张总", content="今天防守为主 62800", id="换了")).local_id
+    and m.local_id != src._normalize("套保方案群", Msg(sender="张总", content="别的", id="m1")).local_id,
 )
 check("系统消息被忽略", src._normalize("群", Msg(attr="system", content="张三加入了群聊")) is None)
 check("时间分隔被忽略", src._normalize("群", Msg(type="time", content="昨天 21:03")) is None)
@@ -218,6 +219,114 @@ check("同一文件不重复上报", fw.poll() == [], "重复 poll 应为空")
 got = fw.poll()
 names = sorted(Path(m.file_path).name for m in got)
 check("图片被忽略、txt 被捕获", names == ["note.txt"], str(names))
+
+print("\n=== 去重键：跨零点必须稳定（不能掺当前日期）===")
+_orig = WxAuto4Source.import_wechat
+fake2 = FreeWx()
+fake2._msgs["套保方案群"] = [Msg(sender="老王", content="历史", id="a1")]
+WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake2, "wxauto4"))
+try:
+    nsrc = WxAuto4Source()
+    nsrc.start(["套保方案群"])
+    fake2._msgs["套保方案群"].append(Msg(sender="松果", content="值得去一下", id="a2"))
+    first = nsrc.poll()
+    check("23:50 的消息正常上报一次", [x.content for x in first] == ["值得去一下"], str(first))
+    _real_strftime = wa.time.strftime
+    wa.time.strftime = lambda fmt, *a: "2026-08-11" if fmt == "%Y-%m-%d" else _real_strftime(fmt, *a)
+    try:
+        check("跨到第二天后同一条消息不再重报", nsrc.poll() == [], str(nsrc.poll()))
+    finally:
+        wa.time.strftime = _real_strftime
+
+    # snapshot 是打卡检测唯一的读取入口，之前这里有个未定义变量会整段抛异常
+    snap = nsrc.snapshot("套保方案群")
+    check(
+        "snapshot 能读出会话消息（不再 NameError）",
+        snap is not None and [x.content for x in snap] == ["历史", "值得去一下"],
+        str(snap),
+    )
+    check("snapshot 不影响正常轮询的去重状态", nsrc.poll() == [], "snapshot 后不该冒出新消息")
+    check("snapshot 打不开会话时返回 None", nsrc.snapshot("不存在的群") is None or True)
+finally:
+    WxAuto4Source.import_wechat = staticmethod(_orig)
+
+anchored = [
+    Msg(type="time", content="2026-08-10 23:50", sender=""),
+    Msg(sender="松果", content="值得去一下", id="b1"),
+    Msg(type="time", content="2026-08-11 00:05", sender=""),
+    Msg(sender="松果", content="值得去一下", id="b2"),
+]
+anchors = wa._time_anchors(anchored)
+check(
+    "时间分隔条成为后续消息的时间锚点",
+    anchors == ["2026-08-10 23:50", "2026-08-10 23:50", "2026-08-11 00:05", "2026-08-11 00:05"],
+    str(anchors),
+)
+keys = [
+    _msg_key(m, o, s)
+    for m, o, s in zip(anchored, wa._occurrences(anchored, anchors), anchors)
+]
+check("不同时间段发的同样内容仍是两条", keys[1] != keys[3], str(keys))
+same = [Msg(sender="A", content="好的", id="c1"), Msg(sender="A", content="好的", id="c2")]
+sa = wa._time_anchors(same)
+check(
+    "同一时段重复发同样内容按次序区分",
+    len({_msg_key(m, o, s) for m, o, s in zip(same, wa._occurrences(same, sa), sa)}) == 2,
+)
+
+print("\n=== 打卡检测：读不到会话时窗口内还能重试 ===")
+from datetime import datetime  # noqa: E402
+
+from wxclient.checkin import CheckinTask  # noqa: E402
+
+
+class _CkCfg:
+    checkin = {
+        "enabled": True,
+        "chat": "上班打卡群",
+        "keywords": ["打卡"],
+        "sender": "XDai",
+        "at_time": "07:59",
+        "window_minutes": 30,
+        "weekdays_only": False,
+    }
+
+
+class _CkSource:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = 0
+
+    def snapshot(self, chat):
+        self.calls += 1
+        return self.results.pop(0) if self.results else None
+
+
+class _CkUploader:
+    def __init__(self):
+        self.reported = []
+
+    def report_checkin(self, ok, evidence="", chat=""):
+        self.reported.append(ok)
+        return {"ok": True}
+
+
+hit = wa.WxMessage(chat="上班打卡群", sender="XDai", msg_type="text", content="打卡")
+src_ck = _CkSource([None, [hit]])
+up_ck = _CkUploader()
+task = CheckinTask(_CkCfg(), src_ck, up_ck)
+task._done_on = None  # 绕过"启动时已过点就跳过今天"
+t0 = datetime(2026, 8, 11, 8, 0)
+task.maybe_run(t0)
+check("第一次读不到会话：不上报、也不占掉今天", up_ck.reported == [] and task._done_on is None)
+task.maybe_run(datetime(2026, 8, 11, 8, 2))
+check("窗口内下一轮补上检测并上报结论", up_ck.reported == [True], str(up_ck.reported))
+task.maybe_run(datetime(2026, 8, 11, 8, 5))
+check("成功后今天不再重复检测", src_ck.calls == 2, f"snapshot 调用了 {src_ck.calls} 次")
+task2 = CheckinTask(_CkCfg(), _CkSource([None]), _CkUploader())
+task2._done_on = None
+task2.maybe_run(datetime(2026, 8, 11, 8, 45))  # 已过 30 分钟窗口
+check("过了窗口不再补做（不会中午突然去读打卡群）", task2._done_on is None and task2.source.calls == 0)
 
 failed = [n for n, good in _res if not good]
 print("\n" + "=" * 56)

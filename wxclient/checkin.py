@@ -85,12 +85,18 @@ class CheckinTask:
         now = now or datetime.now()
         if not self._due(now):
             return False
-        # 先占住今天，避免读会话失败时本轮反复重试（下次到点或明天再说）
+        # 先占住今天，避免异常时本轮反复重试
         self._done_on = now.date()
         try:
-            self.run_once(now)
+            res = self.run_once(now)
         except Exception:
             log.exception("打卡检测异常")
+        else:
+            # 只是这一刻读不到会话（微信窗口正忙、切会话失败）：把今天放回去，
+            # 窗口内下一轮再试一次；别因为一次读失败就整天不检测了。
+            # 窗口过了 _due() 自然不再触发，不会变成无限重试。
+            if isinstance(res, dict) and res.get("skipped"):
+                self._done_on = None
         return True
 
     # ---------------- 检测 ---------------- #

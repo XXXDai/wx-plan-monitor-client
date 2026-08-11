@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,16 +55,18 @@ class WxMessage:
     # 来源侧的会话内去重键；上层处理失败时用它回滚，让这条消息下轮能重新读到
     dedup_key: str = field(default="")
 
-    def compute_local_id(self, occurrence: int = 0, day: str = "") -> str:
-        """服务端去重用的稳定 id：群+人+类型+内容+日期+当天同内容出现次序。
+    def compute_local_id(self, occurrence: int = 0, stamp: str = "") -> str:
+        """服务端去重用的稳定 id：群+人+类型+内容+时间锚点+该锚点下同内容出现次序。
 
-        两条硬规则：
+        三条硬规则：
         · **不掺当前时刻**——否则同一条历史消息每次重扫都算出新 id，服务端按
           local_id 去重就失效，同一句话反复入库、甚至反复触发方案复核；
+        · **也不掺"今天是几号"**——那样一过零点，还显示在窗口里的消息就换了 id，
+          等于每天零点把整窗消息重报一遍（见 _time_anchors）；
         · **不用 wxauto4 的 id/hash**——实测聊天窗口重新渲染后这两个值会变，
           等于每次重渲染都把整窗消息当成新消息。
-        用"日期 + 窗口内同内容次序"既能在重渲染后复现同一个 id，
-        又能区分同一个人当天重复发的同样内容（比如分别回两条指令的两个"好的"）。
+        用"时间锚点 + 同内容次序"既能在重渲染后复现同一个 id，
+        又能区分同一个人重复发的同样内容（比如分别回两条指令的两个"好的"）。
         """
         base = "|".join(
             [
@@ -71,7 +74,7 @@ class WxMessage:
                 self.sender,
                 self.msg_type,
                 self.content,
-                self.wx_time or day or "",
+                self.wx_time or stamp or "",
                 Path(self.file_path).name if self.file_path else "",
                 str(occurrence),
             ]
@@ -147,32 +150,77 @@ def _extract_wx_time(msg: Any) -> str | None:
     return None
 
 
-def _msg_key(msg: Any, occurrence: int = 0, day: str = "") -> str:
+_TIME_TEXT_RE = re.compile(
+    r"^(?:\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?\s*)?(?:昨天|前天|星期[一二三四五六日天]|周[一二三四五六日天])?"
+    r"\s*(?:上午|下午|凌晨|早上|中午|晚上)?\s*\d{1,2}:\d{2}(?::\d{2})?$"
+)
+
+
+def _is_time_divider(msg: Any) -> bool:
+    """是不是聊天窗口里那条时间分隔条（wxauto4 的 type == "time"）。"""
+    mtype = str(getattr(msg, "type", "") or "").lower()
+    attr = str(getattr(msg, "attr", "") or "").lower()
+    if mtype == "time" or attr == "time":
+        return True
+    if mtype in ("", "sys", "system") and not str(getattr(msg, "sender", "") or "").strip():
+        content = str(getattr(msg, "content", "") or "").strip()
+        return bool(content) and _TIME_TEXT_RE.match(content) is not None
+    return False
+
+
+def _time_anchors(msgs: list[Any]) -> list[str]:
+    """给窗口里每条消息标一个"时间锚点"，作为去重键里代表时间的那一段。
+
+    **绝不能用"现在是几号"**：那样一过零点，同一条还显示在窗口里的消息就换了键，
+    整窗消息会被当成新消息重新上报一遍（实测 08-10 23:50 的三条在 00:00 又进了一次）。
+    锚点只跟消息自身有关，所以跨零点也稳定：
+      · 消息自带发送时间就用它；
+      · 否则沿用它上方最近那条时间分隔条的文字（微信就是靠这个显示时间的）；
+      · 都没有就留空——宁可退化成"内容 + 次序"，也不掺当前日期。
+    """
+    out: list[str] = []
+    current = ""
+    for msg in msgs:
+        own = _extract_wx_time(msg)
+        if own:
+            current = str(own).strip()
+        elif _is_time_divider(msg):
+            current = str(getattr(msg, "content", "") or "").strip() or current
+        out.append(current)
+    return out
+
+
+def _msg_key(msg: Any, occurrence: int = 0, stamp: str = "") -> str:
     """消息去重键。
 
     **刻意不用 wxauto4 的 id/hash**：实测这两个值在聊天窗口重新渲染后会变
     （切到别的会话再切回来，同一条消息就换了 id）。用它做键会导致：
       · 整窗消息被当成新消息重复上报（同一句话重复入库、重复触发方案复核）；
       · 而窗口没重新渲染时又读不到新消息。
-    所以改用"内容 + 当天 + 窗口内同内容出现次序"这种可复现的身份：
-    重新渲染算出来还是同一个键；同一个人当天重复发一样的话（比如两次"好的"）
-    次序不同，仍能区分开。
+    所以改用"内容 + 时间锚点 + 该锚点下同内容出现次序"这种可复现的身份：
+    重新渲染算出来还是同一个键；同一个人重复发一样的话（比如两次"好的"）
+    次序不同，仍能区分开。stamp 见 _time_anchors——它不含"当前日期"。
     """
     attr = getattr(msg, "attr", "")
     mtype = getattr(msg, "type", "")
     sender = getattr(msg, "sender", "")
     content = getattr(msg, "content", "")
     return "s:" + hashlib.sha256(
-        f"{day}|{attr}|{mtype}|{sender}|{content}|{occurrence}".encode("utf-8", "ignore")
+        f"{stamp}|{attr}|{mtype}|{sender}|{content}|{occurrence}".encode("utf-8", "ignore")
     ).hexdigest()[:24]
 
 
-def _occurrences(msgs: list[Any]) -> list[int]:
-    """给一次窗口读取里的每条消息编号：同一(发送人,类型,内容)第几次出现（0 起）。"""
+def _occurrences(msgs: list[Any], anchors: list[str] | None = None) -> list[int]:
+    """给一次窗口读取里的每条消息编号：同一(时间锚点,发送人,类型,内容)第几次出现（0 起）。
+
+    次序按时间锚点分段计数：这样窗口往上滚出几条旧消息时，后面消息的编号不会整体
+    左移（否则键会变，同一条消息又成了"新消息"）。
+    """
     seen: dict[tuple, int] = {}
     out: list[int] = []
-    for msg in msgs:
+    for idx, msg in enumerate(msgs):
         ident = (
+            anchors[idx] if anchors else "",
             getattr(msg, "attr", ""),
             getattr(msg, "type", ""),
             getattr(msg, "sender", ""),
@@ -354,16 +402,16 @@ class WxAuto4Source(BaseSource):
 
         seen = self._seen.setdefault(chat, {})
         out: list[WxMessage] = []
-        day = time.strftime("%Y-%m-%d")
-        occs = _occurrences(msgs)
-        for msg, occ in zip(msgs, occs):
-            key = _msg_key(msg, occ, day)
+        anchors = _time_anchors(msgs)
+        occs = _occurrences(msgs, anchors)
+        for msg, occ, stamp in zip(msgs, occs, anchors):
+            key = _msg_key(msg, occ, stamp)
             if key in seen:
                 continue
             seen[key] = None
             if baseline:
                 continue
-            m = self._normalize(chat, msg, occurrence=occ, day=day)
+            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp)
             if m:
                 m.dedup_key = key
                 out.append(m)
@@ -377,7 +425,9 @@ class WxAuto4Source(BaseSource):
         return out
 
     # ---------- 归一化 ---------- #
-    def _normalize(self, chat: str, msg: Any, occurrence: int = 0, day: str = "") -> WxMessage | None:
+    def _normalize(
+        self, chat: str, msg: Any, occurrence: int = 0, stamp: str = ""
+    ) -> WxMessage | None:
         attr = str(getattr(msg, "attr", "") or "").lower()
         mtype = str(getattr(msg, "type", "") or "").lower()
         if attr == "system" or mtype in V4_SKIP_TYPES:
@@ -417,7 +467,7 @@ class WxAuto4Source(BaseSource):
             raw_type=attr or mtype,
         )
         # 不用 wxauto4 的 id/hash：窗口重渲染后会变（详见 _msg_key 的说明）
-        m.local_id = m.compute_local_id(occurrence=occurrence, day=day)
+        m.local_id = m.compute_local_id(occurrence=occurrence, stamp=stamp)
         if not m.content:
             return None
         return m
@@ -458,11 +508,12 @@ class WxAuto4Source(BaseSource):
             log.warning("snapshot GetAllMessage(%s) 异常：%s", chat, exc)
             return None
         out: list[WxMessage] = []
-        day = time.strftime("%Y-%m-%d")
-        for msg, occ in zip(msgs, _occurrences(msgs)):
-            m = self._normalize(chat, msg, occurrence=occ, day=day)
+        anchors = _time_anchors(msgs)
+        for msg, occ, stamp in zip(msgs, _occurrences(msgs, anchors), anchors):
+            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp)
             if m:
-                m.dedup_key = key
+                # snapshot 只读不入队，不写 _seen；dedup_key 仅供调用方参考
+                m.dedup_key = _msg_key(msg, occ, stamp)
                 out.append(m)
         return out
 
