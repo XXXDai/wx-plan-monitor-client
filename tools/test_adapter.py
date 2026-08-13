@@ -351,6 +351,22 @@ class _CkUploader:
 
 
 hit = wa.WxMessage(chat="上班打卡群", sender="XDai", msg_type="text", content="打卡")
+# 08-13 那次误判：微信给自己发的消息填的 sender 是「我」，不是 config 里的 XDai
+mine = wa.WxMessage(
+    chat="上班打卡群", sender="我", msg_type="text", content="打卡", raw_type="self"
+)
+probe = CheckinTask(_CkCfg(), _CkSource([]), _CkUploader())
+check("自己发的打卡按 raw_type=self 认（不再拿 sender 比 XDai）", probe._is_me(mine))
+check("配置里的业务名照样认", probe._is_me(hit))
+check("别人发的打卡不算我打卡", not probe._is_me(
+    wa.WxMessage(chat="上班打卡群", sender="老王", msg_type="text", content="打卡")))
+probe.source = _CkSource([[mine]])
+verdict = probe.detect(datetime(2026, 8, 13, 7, 59))
+check("窗口里有自己发的打卡就判为已打卡", verdict == (True, "打卡"), str(verdict))
+probe.source = _CkSource([[wa.WxMessage(
+    chat="上班打卡群", sender="老王", msg_type="text", content="打卡", raw_type="friend")]])
+verdict = probe.detect(datetime(2026, 8, 13, 7, 59))
+check("只有别人打卡时仍判没打卡", verdict == (False, ""), str(verdict))
 src_ck = _CkSource([None, [hit]])
 up_ck = _CkUploader()
 task = CheckinTask(_CkCfg(), src_ck, up_ck)

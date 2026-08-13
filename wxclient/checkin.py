@@ -100,6 +100,22 @@ class CheckinTask:
         return True
 
     # ---------------- 检测 ---------------- #
+    def _is_me(self, m) -> bool:
+        """这条消息是不是我自己发的。
+
+        **不能只把 sender 和配置里的名字对比**：wxauto4 给自己发的消息填的 sender 是
+        「我」或备注名，不是 config 里那个业务名（sender: XDai）——那个名字只在上报
+        服务端时才改写上去（见 main.py 的 _sender_for_upload，它认自己用的是
+        raw_type == "self"）。原来这里直接比字符串，导致自己发的打卡永远被过滤掉，
+        无论发没发都判成"没打卡"（2026-08-13 就是这么误判的）。
+        """
+        if not self.sender:            # 留空 = 群里任何人发都算
+            return True
+        if str(getattr(m, "raw_type", "") or "") == "self":
+            return True
+        name = (m.sender or "").strip()
+        return name == self.sender or name in ("我", "self", "Self")
+
     def detect(self, now: datetime | None = None) -> tuple[bool | None, str]:
         """读一次打卡群，判断今天有没有打卡。返回 (结论, 证据)；结论 None = 没读到会话。"""
         now = now or datetime.now()
@@ -108,9 +124,15 @@ class CheckinTask:
             return None, ""
         today = now.strftime("%Y-%m-%d")
         hit = ""
+        mine = 0
+        senders: list[str] = []
         for m in msgs:
-            if self.sender and (m.sender or "").strip() != self.sender:
+            name = (m.sender or "").strip()
+            if name and name not in senders:
+                senders.append(name)
+            if not self._is_me(m):
                 continue
+            mine += 1
             content = m.content or ""
             if not any(k in content for k in self.keywords):
                 continue
@@ -118,6 +140,14 @@ class CheckinTask:
             if m.wx_time and today not in str(m.wx_time):
                 continue
             hit = content.strip()[:80]
+        if not hit:
+            # 判"没打卡"要响铃叫人，所以必须留下能自证的痕迹：读到多少条、我发的几条、
+            # 窗口里都有谁。只写本地日志，打卡群的内容一个字都不上报。
+            log.warning(
+                "打卡检测判为「没打卡」：窗口里读到 %d 条，其中我发的 %d 条，"
+                "没有一条含%s（窗口内发言人：%s）",
+                len(msgs), mine, "/".join(self.keywords), "、".join(senders[:8]) or "无",
+            )
         return bool(hit), hit
 
     def run_once(self, now: datetime | None = None) -> dict:
