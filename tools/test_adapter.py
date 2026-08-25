@@ -351,6 +351,7 @@ class _CkUploader:
 
 
 hit = wa.WxMessage(chat="上班打卡群", sender="XDai", msg_type="text", content="打卡")
+hit.time_hint = "07:52"   # 微信对"今天"的时间分隔条只写时间
 # 08-13 那次误判：微信给自己发的消息填的 sender 是「我」，不是 config 里的 XDai
 mine = wa.WxMessage(
     chat="上班打卡群", sender="我", msg_type="text", content="打卡", raw_type="self"
@@ -360,9 +361,47 @@ check("自己发的打卡按 raw_type=self 认（不再拿 sender 比 XDai）", 
 check("配置里的业务名照样认", probe._is_me(hit))
 check("别人发的打卡不算我打卡", not probe._is_me(
     wa.WxMessage(chat="上班打卡群", sender="老王", msg_type="text", content="打卡")))
+mine.time_hint = "7:52"          # 微信对"今天"的分隔条只写时间
 probe.source = _CkSource([[mine]])
 verdict = probe.detect(datetime(2026, 8, 13, 7, 59))
 check("窗口里有自己发的打卡就判为已打卡", verdict == (True, "打卡"), str(verdict))
+
+# 08-13 之后连着几天误判"已打卡"：窗口里留着的旧打卡被当成今天的
+yesterday = wa.WxMessage(chat="上班打卡群", sender="我", msg_type="text",
+                         content="打卡", raw_type="self")
+yesterday.time_hint = "昨天 07:52"
+probe.source = _CkSource([[yesterday]])
+verdict = probe.detect(datetime(2026, 8, 14, 7, 59))
+check("昨天发的打卡不算今天已打卡", verdict == (False, ""), str(verdict))
+
+old_dated = wa.WxMessage(chat="上班打卡群", sender="我", msg_type="text",
+                         content="打卡", raw_type="self")
+old_dated.time_hint = "2026-08-13 07:52"
+probe.source = _CkSource([[old_dated]])
+check("带完整日期的旧打卡也不算",
+      probe.detect(datetime(2026, 8, 14, 7, 59)) == (False, ""))
+probe.source = _CkSource([[old_dated]])
+check("同一天带完整日期的打卡算数",
+      probe.detect(datetime(2026, 8, 13, 7, 59)) == (True, "打卡"))
+
+unknown = wa.WxMessage(chat="上班打卡群", sender="我", msg_type="text",
+                       content="打卡", raw_type="self")
+probe.source = _CkSource([[unknown]])
+check("判断不出日期时按没打卡处理（宁可多响一次铃）",
+      probe.detect(datetime(2026, 8, 14, 7, 59)) == (False, ""))
+
+from wxclient.checkin import when_is_today  # noqa: E402
+
+_n = datetime(2026, 8, 14, 8, 0)
+cases = {
+    "7:52": True, "上午 7:52": True, "23:05:11": True,
+    "昨天 07:52": False, "前天 21:03": False, "星期一 09:12": False, "周三 10:00": False,
+    "2026-08-14 07:52": True, "2026年8月14日 7:52": True,
+    "2026-08-13 07:52": False, "8月14日 7:52": True, "8月13日 7:52": False,
+    "": None, "刚刚": None,
+}
+bad = {k: when_is_today(k, _n) for k, v in cases.items() if when_is_today(k, _n) is not v}
+check("微信各种时间写法都能判对是不是今天", not bad, str(bad))
 probe.source = _CkSource([[wa.WxMessage(
     chat="上班打卡群", sender="老王", msg_type="text", content="打卡", raw_type="friend")]])
 verdict = probe.detect(datetime(2026, 8, 13, 7, 59))

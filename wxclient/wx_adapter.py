@@ -51,6 +51,9 @@ class WxMessage:
     wx_time: str | None = None
     file_path: str | None = None
     raw_type: str = ""  # 后端原始 type / attr
+    # 消息上方最近那条时间分隔条的文字（微信就是靠它显示时间的）。
+    # wxauto4 免费版几乎不给单条消息的发送时间，这是唯一能判断"这条是哪天发的"的依据。
+    time_hint: str = field(default="")
     local_id: str = field(default="")
     # 来源侧的会话内去重键；上层处理失败时用它回滚，让这条消息下轮能重新读到
     dedup_key: str = field(default="")
@@ -168,7 +171,7 @@ def _is_time_divider(msg: Any) -> bool:
     return False
 
 
-def _time_anchors(msgs: list[Any]) -> list[str]:
+def _time_anchors(msgs: list[Any], backfill: bool = True) -> list[str]:
     """给窗口里每条消息标一个"时间锚点"，作为去重键里代表时间的那一段。
 
     **绝不能用"现在是几号"**：那样一过零点，同一条还显示在窗口里的消息就换了键，
@@ -188,6 +191,10 @@ def _time_anchors(msgs: list[Any]) -> list[str]:
         elif _is_time_divider(msg):
             current = str(getattr(msg, "content", "") or "").strip() or current
         out.append(current)
+    if not backfill:
+        # 判断"这条是哪天发的"时不能回填：开头那几条在第一条分隔条**之前**，
+        # 真实时间比它更早，借用下来会把昨天的消息说成今天的。宁可返回空串=不知道。
+        return out
     # 回填开头那段：它们在第一条分隔条之前，借用第一个锚点即可。
     # 别留空——留空会让"另一天发的同样内容"算出同一个 local_id，而服务端那列是
     # UNIQUE，插入直接报错、整批上报失败，客户端会无限重试。
@@ -415,15 +422,16 @@ class WxAuto4Source(BaseSource):
         # 整窗都没有时间信息时才退回"今天几号"：那种情况下宁可零点重报一次，
         # 也不能让不同天的同样内容算出同一个 local_id（服务端 UNIQUE，会插入失败）。
         anchors = [a or time.strftime("%Y-%m-%d") for a in _time_anchors(msgs)]
+        hints = _time_anchors(msgs, backfill=False)
         occs = _occurrences(msgs, anchors)
-        for msg, occ, stamp in zip(msgs, occs, anchors):
+        for msg, occ, stamp, hint in zip(msgs, occs, anchors, hints):
             key = _msg_key(msg, occ, stamp)
             if key in seen:
                 continue
             seen[key] = None
             if baseline:
                 continue
-            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp)
+            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp, time_hint=hint)
             if m:
                 m.dedup_key = key
                 out.append(m)
@@ -438,7 +446,7 @@ class WxAuto4Source(BaseSource):
 
     # ---------- 归一化 ---------- #
     def _normalize(
-        self, chat: str, msg: Any, occurrence: int = 0, stamp: str = ""
+        self, chat: str, msg: Any, occurrence: int = 0, stamp: str = "", time_hint: str = ""
     ) -> WxMessage | None:
         attr = str(getattr(msg, "attr", "") or "").lower()
         mtype = str(getattr(msg, "type", "") or "").lower()
@@ -477,6 +485,7 @@ class WxAuto4Source(BaseSource):
             wx_time=wx_time,
             file_path=None,
             raw_type=attr or mtype,
+            time_hint=time_hint,
         )
         # 不用 wxauto4 的 id/hash：窗口重渲染后会变（详见 _msg_key 的说明）
         m.local_id = m.compute_local_id(occurrence=occurrence, stamp=stamp)
@@ -521,8 +530,9 @@ class WxAuto4Source(BaseSource):
             return None
         out: list[WxMessage] = []
         anchors = [a or time.strftime("%Y-%m-%d") for a in _time_anchors(msgs)]
-        for msg, occ, stamp in zip(msgs, _occurrences(msgs, anchors), anchors):
-            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp)
+        hints = _time_anchors(msgs, backfill=False)
+        for msg, occ, stamp, hint in zip(msgs, _occurrences(msgs, anchors), anchors, hints):
+            m = self._normalize(chat, msg, occurrence=occ, stamp=stamp, time_hint=hint)
             if m:
                 # snapshot 只读不入队，不写 _seen；dedup_key 仅供调用方参考
                 m.dedup_key = _msg_key(msg, occ, stamp)

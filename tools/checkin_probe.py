@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from wxclient.checkin import CheckinTask  # noqa: E402
+from wxclient.checkin import CheckinTask, when_is_today  # noqa: E402
 from wxclient.config import load_config  # noqa: E402
 from wxclient.wx_adapter import build_source  # noqa: E402
 
@@ -39,17 +39,21 @@ if msgs is None:
 task = CheckinTask(cfg, source, uploader=None)
 keywords = task.keywords
 print(f"窗口里读到 {len(msgs)} 条消息：\n")
-print(f"{'发送人':<12} {'wxauto类型':<10} {'raw':<8} {'是我发的':<8} {'含关键词':<8} 内容")
-print("-" * 88)
+now = datetime.now()
+print(f"{'发送人':<12} {'raw':<8} {'时间(锚点)':<20} {'今天?':<7} {'是我发的':<8} {'含关键词':<8} 内容")
+print("-" * 108)
 for m in msgs:
+    when = str(m.wx_time or m.time_hint or "")
+    verdict = when_is_today(when, now)
     print(
-        f"{(m.sender or '(空)'):<12} {m.msg_type:<10} {m.raw_type:<8} "
+        f"{(m.sender or '(空)'):<12} {m.raw_type:<8} {(when or '(无)'):<20} "
+        f"{({True: '✅', False: '❌昨天/更早', None: '❓判不出'}[verdict]):<7} "
         f"{('✅' if task._is_me(m) else '—'):<8} "
         f"{('✅' if any(k in (m.content or '') for k in keywords) else '—'):<8} "
-        f"{(m.content or '')[:30]}"
+        f"{(m.content or '')[:24]}"
     )
 
-ok, evidence = task.detect(datetime.now())
+ok, evidence = task.detect(now)
 print("\n" + "=" * 88)
 print(f"判定结果：{'✅ 今天已打卡' if ok else '❌ 今天没打卡'}" + (f"（证据：{evidence}）" if evidence else ""))
 if not ok:
@@ -57,5 +61,6 @@ if not ok:
         "\n如果上面明明有一行你自己发的打卡：\n"
         "  · 「是我发的」那列是 — ：sender 对不上，把 config.yaml 的 checkin.sender 留空即可放开；\n"
         "  · 「含关键词」那列是 — ：微信里那条打卡的文字和 keywords 不匹配（比如打卡是图片/小程序卡片）；\n"
+        "  · 「今天?」那列是 ❌/❓：这条是旧的打卡，或者微信没给出能判断日期的时间分隔条；\n"
         "  · 整张表里根本没有那条打卡：wxauto4 没把它读出来（类型被跳过），把这张表发我。"
     )

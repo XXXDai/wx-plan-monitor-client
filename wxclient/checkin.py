@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 
 log = logging.getLogger("checkin")
@@ -23,6 +24,38 @@ def _hhmm(s: str) -> tuple[int, int]:
         return int(hh), int(mm or 0)
     except ValueError:
         return 7, 59
+
+
+# 微信时间分隔条的几种写法：今天只写时间（"7:52"/"上午 7:52"），昨天/前天/星期几各有前缀，
+# 更久远的带完整日期（"2026-08-13 07:52" / "2026年8月13日 7:52" / "8月13日 7:52"）。
+_FULL_DATE_RE = re.compile(r"(\d{4})\D{1,2}(\d{1,2})\D{1,2}(\d{1,2})")
+_MONTH_DAY_RE = re.compile(r"^\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?")
+_TIME_ONLY_RE = re.compile(r"^\s*(?:上午|下午|凌晨|早上|中午|晚上)?\s*\d{1,2}:\d{2}(?::\d{2})?\s*$")
+_OTHER_DAY_RE = re.compile(r"昨天|前天|星期[一二三四五六日天]|周[一二三四五六日天]")
+
+
+def when_is_today(text: str, now: datetime) -> bool | None:
+    """这条消息是不是今天发的。True/False/None(判断不出来)。
+
+    免费版 wxauto4 基本不给单条消息的发送时间（实测 153 条文本消息里只有 3 条有，
+    还都是自检消息自己填的），所以只能靠消息上方那条时间分隔条的文字来判断。
+    不判断的话，昨天、上周发的打卡只要还显示在聊天窗口里就会被当成今天的
+    ——2026-08-13 之后连着几天误判"已打卡"就是这么来的。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if m := _FULL_DATE_RE.search(text):
+        y, mo, d = (int(x) for x in m.groups())
+        return (y, mo, d) == (now.year, now.month, now.day)
+    if _OTHER_DAY_RE.search(text):        # 昨天/前天/星期X = 肯定不是今天
+        return False
+    if m := _MONTH_DAY_RE.match(text):    # 只有月日，按今年算
+        mo, d = (int(x) for x in m.groups())
+        return (mo, d) == (now.month, now.day)
+    if _TIME_ONLY_RE.match(text):         # 只写时间 = 微信认为是今天
+        return True
+    return None
 
 
 class CheckinTask:
@@ -126,6 +159,7 @@ class CheckinTask:
         hit = ""
         mine = 0
         senders: list[str] = []
+        stale: list[str] = []    # 命中关键词、但不是（或判断不出是）今天发的
         for m in msgs:
             name = (m.sender or "").strip()
             if name and name not in senders:
@@ -136,8 +170,14 @@ class CheckinTask:
             content = m.content or ""
             if not any(k in content for k in self.keywords):
                 continue
-            # 微信给了时间就按当天过滤；没给就只能认"当前可见窗口里的"（打卡群消息量小，够用）
-            if m.wx_time and today not in str(m.wx_time):
+            # 必须确认是**今天**发的：聊天窗口里还留着昨天、上周的打卡，
+            # 不判日期的话它们会一直被当成今天已打卡（08-13 之后连着误判就是这样）。
+            when = str(m.wx_time or getattr(m, "time_hint", "") or "")
+            is_today = when_is_today(when, now) if not m.wx_time else (today in when)
+            if is_today is not True:
+                # 判断不出来时按"不算"处理：漏响一次铃 = 真忘了打卡也没人叫你，
+                # 比多响一次严重得多。判断不出来的原因写进日志，便于回查。
+                stale.append(f"{when or '时间未知'}")
                 continue
             hit = content.strip()[:80]
         if not hit:
@@ -145,8 +185,10 @@ class CheckinTask:
             # 窗口里都有谁。只写本地日志，打卡群的内容一个字都不上报。
             log.warning(
                 "打卡检测判为「没打卡」：窗口里读到 %d 条，其中我发的 %d 条，"
-                "没有一条含%s（窗口内发言人：%s）",
-                len(msgs), mine, "/".join(self.keywords), "、".join(senders[:8]) or "无",
+                "含%s但不是今天发的 %d 条%s（窗口内发言人：%s）",
+                len(msgs), mine, "/".join(self.keywords), len(stale),
+                ("：" + "、".join(stale[:5])) if stale else "",
+                "、".join(senders[:8]) or "无",
             )
         return bool(hit), hit
 
