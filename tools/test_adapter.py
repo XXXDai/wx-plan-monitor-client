@@ -280,6 +280,55 @@ try:
 finally:
     WxAuto4Source.import_wechat = staticmethod(_orig)
 
+print("\n=== 窗口上滚、顶上的时间分隔条滚出去后，旧消息不能再报一遍 ===")
+# 2026-09-24 00:34 实际发生：一批新消息进来，窗口上滚，00:03 那条分隔条滚出去了，
+# 它下面三条变成"开头那段"、锚点被回填成 00:34，键变了 → 隔 30 分钟又被报了一遍。
+fake4 = FreeWx()
+fake4._msgs["套保方案群"] = [
+    Msg(type="time", content="23:40", sender=""),
+    Msg(sender="孫朔（启峻）", content="83500调整83200", id="w0"),
+]
+WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake4, "wxauto4"))
+try:
+    wsrc = WxAuto4Source()
+    wsrc.start(["套保方案群"])
+    fake4._msgs["套保方案群"] += [
+        Msg(type="time", content="00:03", sender=""),
+        Msg(sender="Tianyus_", content="eth 2640止损已触发", id="w1"),
+        Msg(sender="Tianyus_", content="@宕桑  @孫朔（启峻）", id="w2"),
+        Msg(sender="孫朔（启峻）", content="看到了", id="w3"),
+    ]
+    first = [x.content for x in wsrc.poll()]
+    check("00:03 那三条第一次正常上报", first == ["eth 2640止损已触发", "@宕桑  @孫朔（启峻）", "看到了"], str(first))
+    # 窗口上滚：23:40 段和 00:03 分隔条都滚出去了，00:34 来了新消息
+    fake4._msgs["套保方案群"] = [
+        Msg(sender="Tianyus_", content="eth 2640止损已触发", id="x1"),
+        Msg(sender="Tianyus_", content="@宕桑  @孫朔（启峻）", id="x2"),
+        Msg(sender="孫朔（启峻）", content="看到了", id="x3"),
+        Msg(type="time", content="00:34", sender=""),
+        Msg(sender="孫朔（启峻）", content="我加仓了一部分 。eth止损调整到2620和2590 。各50%", id="x4"),
+    ]
+    second = [x.content for x in wsrc.poll()]
+    check("上滚后只报真正的新消息，旧的三条不再重报",
+          second == ["我加仓了一部分 。eth止损调整到2620和2590 。各50%"], str(second))
+    check("再轮询一次也不会冒出来", wsrc.poll() == [])
+finally:
+    WxAuto4Source.import_wechat = staticmethod(_orig)
+
+# 反过来：整窗一条分隔条都没有时，不能把所有消息都当"开头那段"吞掉
+fake5 = FreeWx()
+fake5._msgs["套保方案群"] = [Msg(sender="A", content="旧消息", id="n1")]
+WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake5, "wxauto4"))
+try:
+    nsrc5 = WxAuto4Source()
+    nsrc5.start(["套保方案群"])
+    fake5._msgs["套保方案群"].append(Msg(sender="B", content="没有分隔条时的新消息", id="n2"))
+    got5 = [x.content for x in nsrc5.poll()]
+    check("整窗没有分隔条时新消息照常上报（不会被误吞）", got5 == ["没有分隔条时的新消息"], str(got5))
+finally:
+    WxAuto4Source.import_wechat = staticmethod(_orig)
+
+
 anchored = [
     Msg(type="time", content="2026-08-10 23:50", sender=""),
     Msg(sender="松果", content="值得去一下", id="b1"),

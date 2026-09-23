@@ -423,13 +423,19 @@ class WxAuto4Source(BaseSource):
         # 也不能让不同天的同样内容算出同一个 local_id（服务端 UNIQUE，会插入失败）。
         anchors = [a or time.strftime("%Y-%m-%d") for a in _time_anchors(msgs)]
         hints = _time_anchors(msgs, backfill=False)
+        # 窗口最上面、第一条时间分隔条之前的那几条：它们一定是窗口里最旧的消息
+        # （新消息只会出现在底部），早就上报过了。它们的锚点是借下方分隔条"回填"来的，
+        # 一旦原来那条分隔条滚出窗口，借到的锚点就变了、键也跟着变——以前会被当成新消息
+        # 再报一遍（2026-09-24「eth 2640止损已触发」隔了 30 分钟又进来一次，被重复分析）。
+        # 所以只要窗口里有分隔条，开头这段一律只记已见、不上报。
+        has_divider = any(hints)
         occs = _occurrences(msgs, anchors)
         for msg, occ, stamp, hint in zip(msgs, occs, anchors, hints):
             key = _msg_key(msg, occ, stamp)
             if key in seen:
                 continue
             seen[key] = None
-            if baseline:
+            if baseline or (has_divider and not hint):
                 continue
             m = self._normalize(chat, msg, occurrence=occ, stamp=stamp, time_hint=hint)
             if m:
