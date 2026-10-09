@@ -73,8 +73,6 @@ class CheckinTask:
         self.sender = str(c.get("sender") or "").strip()
         self.at_h, self.at_m = _hhmm(c.get("at_time", "07:59"))
         self.weekdays_only = bool(c.get("weekdays_only", True))
-        # 调休上班日（周末但要上班）：这些日期即使是周六日也照常检测
-        self.extra_workdays = {str(d).strip() for d in (c.get("extra_workdays") or []) if str(d).strip()}
         # 只在检测时间点之后的这个窗口内才检测；过了窗口就算今天错过了。
         # 没有窗口的话，任何时间启动/运行都会立刻去读打卡群（只要今天还没读过）。
         self.window_minutes = max(1, int(c.get("window_minutes", 30)))
@@ -88,9 +86,6 @@ class CheckinTask:
                     "启动时已过 %02d:%02d，今天不再检测打卡（明天到点自动检测）",
                     self.at_h, self.at_m,
                 )
-        upcoming = sorted(d for d in self.extra_workdays if d >= now.strftime("%Y-%m-%d"))
-        if self.enabled and self.chat and upcoming:
-            log.info("调休上班日（周末照常检测打卡）：%s", "、".join(upcoming))
         if self.enabled and self.chat:
             log.info(
                 "打卡检测已启用：工作日 %02d:%02d 读一次「%s」，只看%s发的含%s的消息（内容不上报）",
@@ -106,14 +101,10 @@ class CheckinTask:
     def _minutes_since_check_time(self, now: datetime) -> int:
         return (now.hour * 60 + now.minute) - (self.at_h * 60 + self.at_m)
 
-    def is_workday(self, now: datetime) -> bool:
-        """周一到周五，或者名单里的调休上班日。"""
-        return now.weekday() < 5 or now.strftime("%Y-%m-%d") in self.extra_workdays
-
     def _due(self, now: datetime) -> bool:
         if not (self.enabled and self.chat):
             return False
-        if self.weekdays_only and not self.is_workday(now):
+        if self.weekdays_only and now.weekday() >= 5:
             return False
         if self._done_on == now.date():
             return False

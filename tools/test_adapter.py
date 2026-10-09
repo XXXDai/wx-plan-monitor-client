@@ -471,28 +471,6 @@ task2._done_on = None
 task2.maybe_run(datetime(2026, 8, 11, 8, 45))  # 已过 30 分钟窗口
 check("过了窗口不再补做（不会中午突然去读打卡群）", task2._done_on is None and task2.source.calls == 0)
 
-
-print("\n=== 调休上班日：周末照常检测打卡 ===")
-
-
-class _WkCfg:
-    checkin = {"enabled": True, "chat": "上班打卡群", "keywords": ["打卡"], "sender": "XDai",
-               "at_time": "07:59", "window_minutes": 30, "weekdays_only": True,
-               "extra_workdays": ["2026-10-10"]}
-
-
-wk = CheckinTask(_WkCfg(), _CkSource([]), _CkUploader())
-wk._done_on = None
-check("10-10 是周六", datetime(2026, 10, 10).weekday() == 5)
-check("10-10 周六（调休上班）07:59 照常检测", wk._due(datetime(2026, 10, 10, 7, 59)))
-wk._done_on = None
-check("10-11 周日不检测", not wk._due(datetime(2026, 10, 11, 7, 59)))
-check("10-17 下周六不检测（只此一天）", not wk._due(datetime(2026, 10, 17, 7, 59)))
-check("普通工作日照常检测", wk._due(datetime(2026, 10, 12, 7, 59)))
-check("调休日也要守检测窗口（07:58 不提前读）", not wk._due(datetime(2026, 10, 10, 7, 58)))
-check("默认配置里带着 10-10 这个调休日",
-      "2026-10-10" in (load_config(TMP / "no-such.yaml").checkin.get("extra_workdays") or []))
-
 failed = [n for n, good in _res if not good]
 print("\n" + "=" * 56)
 print(f"通过 {len(_res) - len(failed)} 项，失败 {len(failed)} 项")
