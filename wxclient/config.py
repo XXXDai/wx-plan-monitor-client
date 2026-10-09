@@ -32,6 +32,8 @@ MANAGED_CHECKIN = {
     "at_time": "07:59",       # 每个工作日这个时间点检测一次
     "window_minutes": 30,     # 只在 07:59 之后这么多分钟内检测；过了就算今天错过
     "weekdays_only": True,
+    # 调休上班日：周末但要上班，这些日期照常检测打卡（YYYY-MM-DD）。过去的日期留着也无害。
+    "extra_workdays": ["2026-10-10"],
 }
 
 
