@@ -29,6 +29,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -171,6 +172,65 @@ def _is_time_divider(msg: Any) -> bool:
     return False
 
 
+_HM_RE = re.compile(r"(上午|下午|凌晨|早上|中午|晚上)?\s*(\d{1,2}):(\d{2})(?::\d{2})?")
+_YMD_RE = re.compile(r"(\d{4})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})")
+_MD_RE = re.compile(r"(\d{1,2})\s*[-/月]\s*(\d{1,2})")
+_WEEKDAY_RE = re.compile(r"(?:星期|周)([一二三四五六日天])")
+_WEEKDAYS = "一二三四五六日"
+
+
+def _now() -> datetime:
+    return datetime.now()
+
+
+def _absolute_time(text: str, now: datetime | None = None) -> str:
+    """把微信的相对时间分隔条换算成绝对时间 "YYYY-MM-DD HH:MM"；认不出就原样返回。
+
+    微信的分隔条是**相对**写法：今天的只写"22:43"，一过零点就改成"昨天 22:43"，
+    再过几天变"星期六 22:43"，更久变"10月10日 22:43"。直接拿这段文字当去重键，
+    每天零点窗口里的旧消息都会换一个键、被当成新消息重报一遍——2026-10-11 00:00
+    一条前一晚的方案调整就这样又进来一次，服务端重新生成了方案（"每天 0 点刷新策略"）。
+    换算成绝对时间后，零点前后算出来是同一个值。
+    """
+    t = (text or "").strip()
+    now = now or _now()
+    m = _HM_RE.search(t)
+    if not m:
+        return t
+    hh, mm, ap = int(m.group(2)), int(m.group(3)), m.group(1)
+    if ap in ("下午", "晚上") and hh < 12:
+        hh += 12
+    elif ap == "中午" and hh < 11:
+        hh += 12
+    elif ap in ("凌晨", "上午", "早上") and hh == 12:
+        hh = 0
+    if hh > 23 or mm > 59:
+        return t
+    head = t[: m.start()]
+    d = now.date()
+    try:
+        if ymd := _YMD_RE.search(head):
+            d = date(int(ymd.group(1)), int(ymd.group(2)), int(ymd.group(3)))
+        elif "前天" in head:
+            d -= timedelta(days=2)
+        elif "昨天" in head:
+            d -= timedelta(days=1)
+        elif wd := _WEEKDAY_RE.search(head):
+            target = _WEEKDAYS.index("日" if wd.group(1) == "天" else wd.group(1))
+            d -= timedelta(days=((d.weekday() - target) % 7) or 7)
+        elif md := _MD_RE.search(head):
+            d = date(now.year, int(md.group(1)), int(md.group(2)))
+            if d > now.date():
+                d = date(now.year - 1, d.month, d.day)
+        elif (hh * 60 + mm) > (now.hour * 60 + now.minute) + 10:
+            # 只写时间 = 今天。但"今天"的时间不可能比现在晚——晚了说明是零点前那条，
+            # 微信还没来得及把它改写成"昨天"（留 10 分钟余量，免得两边时钟差一点就误判）。
+            d -= timedelta(days=1)
+    except ValueError:
+        return t
+    return f"{d.year:04d}-{d.month:02d}-{d.day:02d} {hh:02d}:{mm:02d}"
+
+
 def _time_anchors(msgs: list[Any], backfill: bool = True) -> list[str]:
     """给窗口里每条消息标一个"时间锚点"，作为去重键里代表时间的那一段。
 
@@ -184,12 +244,14 @@ def _time_anchors(msgs: list[Any], backfill: bool = True) -> list[str]:
     """
     out: list[str] = []
     current = ""
+    now = _now()
     for msg in msgs:
         own = _extract_wx_time(msg)
         if own:
-            current = str(own).strip()
+            current = _absolute_time(str(own), now)
         elif _is_time_divider(msg):
-            current = str(getattr(msg, "content", "") or "").strip() or current
+            raw = str(getattr(msg, "content", "") or "").strip()
+            current = _absolute_time(raw, now) if raw else current
         out.append(current)
     if not backfill:
         # 判断"这条是哪天发的"时不能回填：开头那几条在第一条分隔条**之前**，

@@ -471,6 +471,56 @@ task2._done_on = None
 task2.maybe_run(datetime(2026, 8, 11, 8, 45))  # 已过 30 分钟窗口
 check("过了窗口不再补做（不会中午突然去读打卡群）", task2._done_on is None and task2.source.calls == 0)
 
+
+print("\n=== 零点前后同一条消息的去重键不变（微信把「22:43」改写成「昨天 22:43」）===")
+from datetime import datetime as _dt  # noqa: E402
+
+_n = _dt(2026, 10, 11, 0, 1)
+_cases = {
+    ("22:43", _dt(2026, 10, 10, 23, 59)): "2026-10-10 22:43",
+    ("昨天 22:43", _n): "2026-10-10 22:43",
+    ("22:43", _n): "2026-10-10 22:43",                 # 零点刚过、微信还没改写成"昨天"
+    ("00:00", _n): "2026-10-11 00:00",
+    ("前天 09:05", _n): "2026-10-09 09:05",
+    ("星期一 09:12", _dt(2026, 10, 14, 12, 0)): "2026-10-12 09:12",
+    ("10月10日 22:43", _n): "2026-10-10 22:43",
+    ("2026年8月13日 下午3:05", _n): "2026-08-13 15:05",
+    ("2026-08-07 22:37:00", _n): "2026-08-07 22:37",
+    ("上午 7:52", _dt(2026, 10, 12, 8, 0)): "2026-10-12 07:52",
+    ("刚刚", _n): "刚刚",
+}
+_bad = {k[0]: wa._absolute_time(*k) for k, v in _cases.items() if wa._absolute_time(*k) != v}
+check("微信各种相对时间都换算成同一个绝对时间", not _bad, str(_bad))
+
+fake6 = FreeWx()
+fake6._msgs["套保方案群"] = [Msg(type="time", content="22:30", sender=""),
+                            Msg(sender="老王", content="旧消息", id="z0")]
+_real_now = wa._now
+WxAuto4Source.import_wechat = staticmethod(lambda: (lambda: fake6, "wxauto4"))
+try:
+    wa._now = lambda: _dt(2026, 10, 10, 23, 58)
+    zsrc = WxAuto4Source()
+    zsrc.start(["套保方案群"])
+    fake6._msgs["套保方案群"] = [
+        Msg(type="time", content="22:43", sender=""),
+        Msg(sender="宕桑", content="下方81000做电话提醒，上方83600做微信群提醒", id="z1"),
+        Msg(sender="Tianyus_", content="好的", id="z2"),
+    ]
+    wa._now = lambda: _dt(2026, 10, 10, 23, 59)
+    first6 = [x.content for x in zsrc.poll()]
+    check("23:59 方案调整和「好的」正常上报", first6 == ["下方81000做电话提醒，上方83600做微信群提醒", "好的"], str(first6))
+    # 过零点：微信把分隔条改写成"昨天 22:43"
+    fake6._msgs["套保方案群"][0] = Msg(type="time", content="昨天 22:43", sender="")
+    wa._now = lambda: _dt(2026, 10, 11, 0, 1)
+    again6 = [x.content for x in zsrc.poll()]
+    check("00:01 分隔条变成「昨天 22:43」后不再重报（不会触发方案重算）", again6 == [], str(again6))
+    # 零点刚过、微信还没改写（仍显示 22:43）也不能重报
+    fake6._msgs["套保方案群"][0] = Msg(type="time", content="22:43", sender="")
+    check("零点刚过微信还没改写时也不重报", zsrc.poll() == [])
+finally:
+    wa._now = _real_now
+    WxAuto4Source.import_wechat = staticmethod(_orig)
+
 failed = [n for n, good in _res if not good]
 print("\n" + "=" * 56)
 print(f"通过 {len(_res) - len(failed)} 项，失败 {len(failed)} 项")
